@@ -6,7 +6,7 @@ import { say, twin } from "./i18n.js";
 import { put } from "./store.js";
 import { TAB_IDS, browseView, searchView, liveView, settingsView, cardOf } from "./screenView.js";
 
-const PLUGIN_VERSION = "0.1.4";
+const PLUGIN_VERSION = "0.1.5";
 const TAB_KEY = "superTab";
 const HIST_KEY = "searchHist:v1";
 const HIST_MAX = 24;
@@ -273,7 +273,7 @@ const events = {
     if (r.ok) { resetCaches(); cacheKey = cat.serverKey(); }
     let servers;
     try { servers = await cat.serverList(); } catch (_) { servers = { current: -1, items: [] }; }
-    return { state: { ...bump(state), failed: null, servers }, sheet: serverSheet(servers), toast: { text: say(r.ok ? "srvSelected" : "srvSelectFail", lang, { host: r.label || r.host || "" }), role: r.ok ? "success" : "error" } };
+    return { state: { ...bump(state), failed: null, servers }, sheet: serverSheet(servers), toast: { text: say(r.ok ? "srvSelected" : "srvSelectFail", lang, { host: r.host || r.label || "" }), role: r.ok ? "success" : "error" } };
   },
   saved({ state }) { return { state: bump(state) }; },
 };
