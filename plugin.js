@@ -1339,7 +1339,7 @@ function verifyingView({ device } = {}) {
 }
 
 // src/screen.js
-var PLUGIN_VERSION = "0.1.10";
+var PLUGIN_VERSION = "0.1.11";
 var TAB_KEY = "superTab";
 var HIST_KEY = "searchHist:v1";
 var HIST_MAX = 24;
@@ -1409,7 +1409,7 @@ function serverSheet(servers) {
     const hasCountry = s.label !== s.host;
     const title2 = hasCountry ? s.label : s.host;
     const sub = hasCountry ? s.https ? s.host : `${s.host} \xB7 http` : s.https ? "" : "http";
-    const leading = s.flag ? { type: "Image", key: "flag-" + s.i, url: `https://flagcdn.com/w40/${s.flag}.png`, aspect: "4:3", h: 22 } : { type: "Icon", name: "language" };
+    const leading = s.flag ? { type: "Image", key: "flag-" + s.i, url: `https://flagcdn.com/w40/${s.flag}.png`, w: 32, h: 24 } : { type: "Icon", name: "language" };
     return {
       type: "ListTile",
       key: "srvrow-" + s.i,
