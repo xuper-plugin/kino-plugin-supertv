@@ -1091,6 +1091,7 @@ function browseView({ tab, data, loading, failed, device = "phone" }) {
       title: tv ? { type: "Row", key: "titleRow", gap: 24, crossAxisAlignment: "center", children: [title(), tabBar(active)] } : title(),
       actions: [
         ...tv ? [barButton("searchButton", "search", "search", "openSearch")] : [],
+        barButton("serverBtn", "language", "setPick", "openServers"),
         barButton("settings", "settings", "settings", { event: "go", arg: "settings" })
       ]
     },
@@ -1206,7 +1207,7 @@ function settingsView({ srv, servers, busy, pluginVersion, appVersion, device })
             onChanged: "srv.select",
             enabled: !busy,
             options: servers.items.slice(0, 60).map((s) => {
-              const t = `${s.label}  ${s.host}${s.https ? "" : " \xB7 http"}`;
+              const t = `${s.label === s.host ? s.host : s.label + "  " + s.host}${s.https ? "" : " \xB7 http"}`;
               return { value: String(s.i), label: t, labelEn: t };
             })
           },
@@ -1238,7 +1239,7 @@ function settingsView({ srv, servers, busy, pluginVersion, appVersion, device })
 }
 
 // src/screen.js
-var PLUGIN_VERSION = "0.1.2";
+var PLUGIN_VERSION = "0.1.3";
 var TAB_KEY = "superTab";
 var HIST_KEY = "searchHist:v1";
 var HIST_MAX = 24;
@@ -1517,6 +1518,37 @@ var events = {
     const r = await refreshServers();
     const srv = await serverStatus();
     return { state: { srv, busy: false }, toast: { text: say(r.ok ? "refreshed" : "refreshFail", lang, { n: r.total }), role: r.ok ? "success" : "error" } };
+  },
+  // Modal (sheet) del selector de servidor, abierto desde el botón del header.
+  async openServers() {
+    let servers;
+    try {
+      servers = await serverList();
+    } catch (_) {
+      servers = { current: -1, items: [] };
+    }
+    const rows = servers.items.slice(0, 60).map((s) => {
+      const t = `${s.label === s.host ? s.host : s.label + "  " + s.host}${s.https ? "" : " \xB7 http"}`;
+      return {
+        type: "ListTile",
+        key: "srvrow-" + s.i,
+        title: t,
+        titleEn: t,
+        leading: { type: "Icon", name: s.i === servers.current ? "check" : "language" },
+        onTap: { event: "srv.pick", arg: String(s.i) }
+      };
+    });
+    const body = rows.length ? rows : [{ type: "Text", key: "srvEmpty", ...twin("liveEmpty", "text") }];
+    return { state: { servers }, sheet: { ...twin("setPick", "title"), body } };
+  },
+  // Elegido un servidor en el modal: fijar, cerrar el modal, limpiar cachés y recargar el tab actual con ese servidor.
+  async "srv.pick"({ arg, state, lang }) {
+    const r = await selectServer(arg);
+    if (r.ok) {
+      resetCaches();
+      cacheKey = serverKey();
+    }
+    return { close: true, state: { ...bump(state), failed: null }, toast: { text: say(r.ok ? "srvSelected" : "srvSelectFail", lang, { host: r.label || r.host || "" }), role: r.ok ? "success" : "error" } };
   },
   saved({ state }) {
     return { state: bump(state) };

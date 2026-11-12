@@ -100,6 +100,7 @@ export function browseView({ tab, data, loading, failed, device = "phone" }) {
       title: tv ? { type: "Row", key: "titleRow", gap: 24, crossAxisAlignment: "center", children: [title(), tabBar(active)] } : title(),
       actions: [
         ...(tv ? [barButton("searchButton", "search", "search", "openSearch")] : []),
+        barButton("serverBtn", "language", "setPick", "openServers"),
         barButton("settings", "settings", "settings", { event: "go", arg: "settings" }),
       ],
     },
@@ -207,7 +208,7 @@ export function settingsView({ srv, servers, busy, pluginVersion, appVersion, de
         ...(servers && Array.isArray(servers.items) && servers.items.length > 1 ? [
           { type: "DropdownButton", key: "serverPick", ...twin("setPick", "labelText"), value: String(servers.current),
             onChanged: "srv.select", enabled: !busy,
-            options: servers.items.slice(0, 60).map((s) => { const t = `${s.label}  ${s.host}${s.https ? "" : " · http"}`; return { value: String(s.i), label: t, labelEn: t }; }) },
+            options: servers.items.slice(0, 60).map((s) => { const t = `${s.label === s.host ? s.host : s.label + "  " + s.host}${s.https ? "" : " · http"}`; return { value: String(s.i), label: t, labelEn: t }; }) },
           caption("setPickHint"),
         ] : []),
         { type: "Row", wrap: true, gap: 8, children: [

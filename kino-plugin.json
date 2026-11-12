@@ -1,7 +1,7 @@
 {
   "id": "super-tv",
   "name": "SuperTV",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "apiVersion": 13,
   "entry": "plugin.js",
   "description": "Canales de TV en vivo.",
@@ -379,6 +379,6 @@
   },
   "signature": {
     "authorKey": "6693946bd5c56196960959c4b9665fad5094374bcb85ddb282f8bf762c835263",
-    "value": "0d00a65b6d87a8afdd3fc2f58ff92971af0a87568e954b6b2d45d5f3ab10402e54ff473b5fb46e737070d709cf20b6b7b75959dd63f894c919023dd8363e4608"
+    "value": "f2d721d120f88c8cf5d94914565428f3cb191c60f2db1217fdd5e4694524519094c14d6e98bfe37912fff7b59152633554e2b5f8ffb67a566bb2d14a525c7801"
   }
 }
