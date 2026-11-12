@@ -48,11 +48,12 @@ const tabBar = (active) => ({
   tabs: TAB_IDS.map((id) => ({ value: id, ...twin(TAB_KEYS[id], "label") })),
 });
 
-const roundChannel = (c, n) => ({
-  type: "Column", key: "ch-" + n, w: 120, gap: 8, crossAxisAlignment: "center",
+// `uid` debe ser único en toda la pantalla: un canal puede estar en varias categorías, así que la clave lleva la fila + la posición.
+const roundChannel = (c, uid) => ({
+  type: "Column", key: "ch-" + uid, w: 120, gap: 8, crossAxisAlignment: "center",
   onTap: { go: { play: { ref: c.ref, kind: "live", id: c.id, title: c.title } } },
   children: [
-    { type: "CircleAvatar", key: "chl-" + n, radius: 44, ...(c.poster ? { image: c.poster } : { text: String(c.title).slice(0, 2).toUpperCase() }), labelText: c.title, labelTextEn: c.title },
+    { type: "CircleAvatar", key: "chl-" + uid, radius: 44, ...(c.poster ? { image: c.poster } : {}), text: String(c.title).slice(0, 2).toUpperCase(), labelText: c.title, labelTextEn: c.title },
     { type: "Text", text: c.title, textEn: c.title, style: "caption", maxLines: 1, textAlign: "center" },
   ],
 });
@@ -66,7 +67,7 @@ const roundRail = (items, key, titleProps, onMore) => ({
         { type: "TextButton", key: key + "More", ...twin("seeAll", "labelText"), onPressed: onMore },
       ] }
       : { type: "Text", ...titleProps, style: "h4" },
-    { type: "SingleChildScrollView", key: key + "Scroll", direction: "horizontal", children: [{ type: "Row", gap: 24, children: items.slice(0, 20).map(roundChannel) }] },
+    { type: "SingleChildScrollView", key: key + "Scroll", direction: "horizontal", children: [{ type: "Row", gap: 24, children: items.slice(0, 20).map((c, i) => roundChannel(c, key + "-" + i)) }] },
   ],
 });
 
@@ -163,7 +164,7 @@ export function liveView({ cats, cat, items, failed = false, device = "phone" })
   if (failed) body.push({ type: "MaterialBanner", key: "liveFailed", role: "error", ...twin("failed"), action: { ...twin("retry", "label"), onTap: "lretry" } });
   else if (cats && cats.length === 0) body.push({ type: "Text", ...twin("liveEmpty", "text"), color: "muted" });
   else if (items && items.length === 0) body.push({ type: "Text", ...twin("liveEmpty", "text"), color: "muted" });
-  else if (items && tv) body.push({ type: "Row", key: "channels", wrap: true, gap: 24, children: items.slice(0, 40).map(roundChannel) });
+  else if (items && tv) body.push({ type: "Row", key: "channels", wrap: true, gap: 24, children: items.slice(0, 40).map((c, i) => roundChannel(c, "lv-" + i)) });
   else if (items) {
     body.push({ type: "titleGrid", key: "channels", columns: { compact: 3, expanded: 6 }, items: items.slice(0, GRID_CAP) });
     if (items.length >= GRID_CAP) body.push({ type: "Text", ...twin("liveMore", "text", { n: GRID_CAP }), style: "caption", color: "muted" });
