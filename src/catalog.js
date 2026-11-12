@@ -116,14 +116,27 @@ async function fetchServerList() {
 }
 
 // Clave corta del servidor activo (sin usuario ni contraseña a la vista): separa las cachés de catálogo entre servidores.
-export function serverKey() {
-  const st = readSrvs();
-  const srv = st && Array.isArray(st.list) ? st.list[st.idx] : null;
-  if (!srv) return "";
+// Clave estable de un servidor (misma cuenta en el mismo host): identifica un servidor concreto en los `ref` de las
+// fuentes alternativas, sin exponer usuario ni contraseña.
+export function keyOf(srv) {
+  if (!srv || !srv.url) return "";
   let h = 5381;
   const text = srv.url + "|" + srv.username;
   for (let i = 0; i < text.length; i++) h = ((h << 5) + h + text.charCodeAt(i)) | 0;
   return (h >>> 0).toString(36);
+}
+
+export function serverKey() {
+  const st = readSrvs();
+  const srv = st && Array.isArray(st.list) ? st.list[st.idx] : null;
+  return keyOf(srv);
+}
+
+// El servidor de la lista cuya clave es [k] (para resolver una fuente alternativa contra ese servidor).
+function serverByKey(k) {
+  const st = readSrvs();
+  if (!st || !Array.isArray(st.list)) return null;
+  return st.list.find((s) => keyOf(s) === k) || null;
 }
 
 function readSrvs() {
@@ -640,13 +653,51 @@ export async function guide({ channelIds, from, to }) {
 
 // ---- resolve --------------------------------------------------------------------
 
+// ---- fuentes por servidor (el menú "Servidor" del reproductor) -----------------------------------------
+// Los servidores son espejos y comparten el id de stream del canal. Una fuente alternativa es el MISMO canal (mismo id) en
+// otro servidor online, etiquetado por país. Perezosa: solo se resuelve al elegirla. En vivo no tiene consulta por id (verificar
+// exigiría bajar toda la lista, ~MB → riesgo de OOM), así que se muestran todos los online y el que no lo tenga lo cubre el
+// fallback del reproductor (sin "aprende" para en vivo).
+function buildAlternatives(id, activeKey) {
+  const st = readSrvs();
+  if (!id || !st || !Array.isArray(st.list)) return [];
+  const h = healthFresh();
+  const online = h ? new Set(h.online) : null;
+  const countBy = {}; // cuántos servidores por país: para desambiguar los repetidos con el host
+  const out = [];
+  for (const srv of st.list) {
+    const k = keyOf(srv);
+    if (!k || k === activeKey) continue;
+    if (online && !online.has(srv.url)) continue; // solo online, si hay chequeo fresco
+    const base = niceLabel(srv);
+    countBy[base] = (countBy[base] || 0) + 1;
+    out.push({ k, base, host: hostOf(srv) });
+  }
+  const label = (e) => (countBy[e.base] > 1 && e.host ? `${e.base} · ${e.host}` : e.base);
+  return out.slice(0, 12).map((e) => ({ label: label(e), ref: `at:${e.k}~l~${id}` }));
+}
+
 export async function resolve(ref) {
-  const { url, username, password } = await activeServer();
   const s = String(ref || "");
+
+  // Fuente alternativa: el mismo canal en otro servidor (no el activo, y sin cambiarlo).
+  if (s.startsWith("at:")) {
+    const segs = s.slice(3).split("~");
+    const srv = serverByKey(segs[0]);
+    const id = segs[2] || "";
+    if (!srv || segs[1] !== "l" || !/^\d+$/.test(id)) throw kino.error("not_found", "fuente desconocida");
+    return { url: `${srv.url}/live/${srv.username}/${srv.password}/${id}.${liveFormat()}` };
+  }
+
+  const active = await activeServer();
+  const { url, username, password } = active;
   if (s.startsWith("live:")) {
-    const id = s.slice(5);
+    const id = s.slice(5).split("~")[0];
     if (!/^\d+$/.test(id)) throw kino.error("not_found");
-    return { url: `${url}/live/${username}/${password}/${id}.${liveFormat()}` };
+    const out = { url: `${url}/live/${username}/${password}/${id}.${liveFormat()}` };
+    const alts = buildAlternatives(id, serverKey());
+    if (alts.length) { out.alternatives = alts; out.label = niceLabel(active); } // etiqueta del servidor activo en el menú "Servidor"
+    return out;
   }
   throw kino.error("not_found", "ref desconocido: " + s.slice(0, 30));
 }

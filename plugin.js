@@ -502,14 +502,22 @@ async function fetchServerList() {
   }
   throw kino.error("unavailable", "bootstrap: sin servidores", { userMessage: "El servicio no tiene servidores disponibles." });
 }
-function serverKey() {
-  const st = readSrvs();
-  const srv = st && Array.isArray(st.list) ? st.list[st.idx] : null;
-  if (!srv) return "";
+function keyOf(srv) {
+  if (!srv || !srv.url) return "";
   let h = 5381;
   const text2 = srv.url + "|" + srv.username;
   for (let i = 0; i < text2.length; i++) h = (h << 5) + h + text2.charCodeAt(i) | 0;
   return (h >>> 0).toString(36);
+}
+function serverKey() {
+  const st = readSrvs();
+  const srv = st && Array.isArray(st.list) ? st.list[st.idx] : null;
+  return keyOf(srv);
+}
+function serverByKey(k) {
+  const st = readSrvs();
+  if (!st || !Array.isArray(st.list)) return null;
+  return st.list.find((s) => keyOf(s) === k) || null;
 }
 function readSrvs() {
   try {
@@ -988,13 +996,45 @@ async function guide({ channelIds, from, to }) {
   }));
   return lists.flat();
 }
+function buildAlternatives(id, activeKey) {
+  const st = readSrvs();
+  if (!id || !st || !Array.isArray(st.list)) return [];
+  const h = healthFresh();
+  const online = h ? new Set(h.online) : null;
+  const countBy = {};
+  const out = [];
+  for (const srv of st.list) {
+    const k = keyOf(srv);
+    if (!k || k === activeKey) continue;
+    if (online && !online.has(srv.url)) continue;
+    const base = niceLabel(srv);
+    countBy[base] = (countBy[base] || 0) + 1;
+    out.push({ k, base, host: hostOf(srv) });
+  }
+  const label = (e) => countBy[e.base] > 1 && e.host ? `${e.base} \xB7 ${e.host}` : e.base;
+  return out.slice(0, 12).map((e) => ({ label: label(e), ref: `at:${e.k}~l~${id}` }));
+}
 async function resolve(ref) {
-  const { url, username, password } = await activeServer();
   const s = String(ref || "");
+  if (s.startsWith("at:")) {
+    const segs = s.slice(3).split("~");
+    const srv = serverByKey(segs[0]);
+    const id = segs[2] || "";
+    if (!srv || segs[1] !== "l" || !/^\d+$/.test(id)) throw kino.error("not_found", "fuente desconocida");
+    return { url: `${srv.url}/live/${srv.username}/${srv.password}/${id}.${liveFormat()}` };
+  }
+  const active = await activeServer();
+  const { url, username, password } = active;
   if (s.startsWith("live:")) {
-    const id = s.slice(5);
+    const id = s.slice(5).split("~")[0];
     if (!/^\d+$/.test(id)) throw kino.error("not_found");
-    return { url: `${url}/live/${username}/${password}/${id}.${liveFormat()}` };
+    const out = { url: `${url}/live/${username}/${password}/${id}.${liveFormat()}` };
+    const alts = buildAlternatives(id, serverKey());
+    if (alts.length) {
+      out.alternatives = alts;
+      out.label = niceLabel(active);
+    }
+    return out;
   }
   throw kino.error("not_found", "ref desconocido: " + s.slice(0, 30));
 }
@@ -1339,7 +1379,7 @@ function verifyingView({ device } = {}) {
 }
 
 // src/screen.js
-var PLUGIN_VERSION = "0.1.11";
+var PLUGIN_VERSION = "0.1.12";
 var TAB_KEY = "superTab";
 var HIST_KEY = "searchHist:v1";
 var HIST_MAX = 24;
