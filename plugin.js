@@ -643,9 +643,8 @@ function flagInfo(s) {
   return String(s || "").includes("\u{1F310}") ? { code: "", name: "Global" } : null;
 }
 var niceLabel = (srv) => {
-  const base = labelOf(srv);
-  const fi = flagInfo(base);
-  return fi ? `${base} ${fi.name}` : base;
+  const fi = flagInfo(labelOf(srv));
+  return fi ? fi.code ? `${fi.code.toUpperCase()} \xB7 ${fi.name}` : fi.name : labelOf(srv);
 };
 async function serverStatus() {
   const cached = readSrvs();
@@ -1339,7 +1338,7 @@ function verifyingView({ device } = {}) {
 }
 
 // src/screen.js
-var PLUGIN_VERSION = "0.1.7";
+var PLUGIN_VERSION = "0.1.8";
 var TAB_KEY = "superTab";
 var HIST_KEY = "searchHist:v1";
 var HIST_MAX = 24;
@@ -1405,16 +1404,19 @@ var bump = (state) => ({ n: (state.n || 0) + 1 });
 function serverSheet(servers) {
   const cur = servers.current;
   const rows = (servers.items || []).slice(0, 60).map((s) => {
-    const t = `${s.label === s.host ? s.host : s.label + "  " + s.host}${s.https ? "" : " \xB7 http"}`;
     const sel = s.i === cur;
+    const hasCountry = s.label !== s.host;
+    const title2 = hasCountry ? s.label : s.host;
+    const sub = hasCountry ? s.https ? s.host : `${s.host} \xB7 http` : s.https ? "" : "http";
     const leading = s.flag ? { type: "Image", key: "flag-" + s.i, url: `https://flagcdn.com/w40/${s.flag}.png`, aspect: "4:3", h: 22 } : { type: "Icon", name: "language" };
     return {
       type: "ListTile",
       key: "srvrow-" + s.i,
-      title: t,
-      titleEn: t,
+      title: title2,
+      titleEn: title2,
       selected: sel,
       leading,
+      ...sub ? { subtitle: sub, subtitleEn: sub } : {},
       ...sel ? { trailing: { type: "Icon", name: "check" } } : {},
       onTap: { event: "srv.pick", arg: String(s.i) }
     };
