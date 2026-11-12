@@ -1,0 +1,384 @@
+{
+  "id": "super-tv",
+  "name": "SuperTV",
+  "version": "0.1.0",
+  "apiVersion": 13,
+  "entry": "plugin.js",
+  "description": "Canales de TV en vivo.",
+  "descriptionEn": "Live TV channels.",
+  "author": "xuper-plugin",
+  "homepage": "https://github.com/xuper-plugin/kino-plugin-supertv",
+  "hosts": [
+    {
+      "host": "vegetatvv2.duckdns.org",
+      "insecureHttp": true
+    },
+    {
+      "host": "966gaddn.com",
+      "insecureHttp": true
+    },
+    {
+      "host": "9paday.wtf",
+      "insecureHttp": true
+    },
+    {
+      "host": "alakazoo.xyz",
+      "insecureHttp": true
+    },
+    {
+      "host": "alexatv.world",
+      "insecureHttp": true
+    },
+    {
+      "host": "apex-ayoumas.com",
+      "insecureHttp": true
+    },
+    {
+      "host": "ashmedia.site",
+      "insecureHttp": true
+    },
+    {
+      "host": "avefenixtv.com",
+      "insecureHttp": true
+    },
+    {
+      "host": "brumotto00.zapto.org",
+      "insecureHttp": true
+    },
+    {
+      "host": "capitanhero.com"
+    },
+    {
+      "host": "doubleclicktv.live",
+      "insecureHttp": true
+    },
+    {
+      "host": "dreamteev.xyz",
+      "insecureHttp": true
+    },
+    {
+      "host": "dsaiiiilllliillsad.cdnip.online",
+      "insecureHttp": true
+    },
+    {
+      "host": "eu.kartal38.com",
+      "insecureHttp": true
+    },
+    {
+      "host": "fast-smart33.xyz",
+      "insecureHttp": true
+    },
+    {
+      "host": "frido1.live",
+      "insecureHttp": true
+    },
+    {
+      "host": "fv99.nesewvp.top",
+      "insecureHttp": true
+    },
+    {
+      "host": "goodbom.net",
+      "insecureHttp": true
+    },
+    {
+      "host": "hydragold.xyz",
+      "insecureHttp": true
+    },
+    {
+      "host": "interstellar.salex74.xyz",
+      "insecureHttp": true
+    },
+    {
+      "host": "krplay.eu",
+      "insecureHttp": true
+    },
+    {
+      "host": "line.krishkaz.com",
+      "insecureHttp": true
+    },
+    {
+      "host": "line.tmpes.com",
+      "insecureHttp": true
+    },
+    {
+      "host": "line.zee-ott.xyz",
+      "insecureHttp": true
+    },
+    {
+      "host": "line.zen8kk.xyz",
+      "insecureHttp": true
+    },
+    {
+      "host": "line.znn8.xyz",
+      "insecureHttp": true
+    },
+    {
+      "host": "louismag.com",
+      "insecureHttp": true
+    },
+    {
+      "host": "ltv.ddns.net",
+      "insecureHttp": true
+    },
+    {
+      "host": "lunicaoriginaleapp.giize.com",
+      "insecureHttp": true
+    },
+    {
+      "host": "myultratv.com",
+      "insecureHttp": true
+    },
+    {
+      "host": "neezfaopro.top",
+      "insecureHttp": true
+    },
+    {
+      "host": "nexotvplus.com",
+      "insecureHttp": true
+    },
+    {
+      "host": "pp.tresinl.xyz",
+      "insecureHttp": true
+    },
+    {
+      "host": "reborned.cc",
+      "insecureHttp": true
+    },
+    {
+      "host": "sa.xurvani.cfd",
+      "insecureHttp": true
+    },
+    {
+      "host": "toni-tv.com",
+      "insecureHttp": true
+    },
+    {
+      "host": "topcliente.xyz",
+      "insecureHttp": true
+    },
+    {
+      "host": "vca.easy747.com",
+      "insecureHttp": true
+    },
+    {
+      "host": "vewora.com",
+      "insecureHttp": true
+    },
+    {
+      "host": "vip2.sharkhost.xyz",
+      "insecureHttp": true
+    },
+    {
+      "host": "wickediptv.live",
+      "insecureHttp": true
+    },
+    {
+      "host": "xvisnet.xyz",
+      "insecureHttp": true
+    }
+  ],
+  "fetchHosts": "any",
+  "streamHosts": "any",
+  "capabilities": [
+    "home",
+    "search",
+    "channels",
+    "resolve"
+  ],
+  "categories": [
+    "live"
+  ],
+  "color": "#2563EB",
+  "icon": "icon.png",
+  "theme": {
+    "accent": "#2563EB",
+    "onAccent": "#FFFFFF",
+    "background": "#0B0F1A",
+    "surface": "#141A2A",
+    "highlight": "#93C5FD"
+  },
+  "section": {
+    "label": "SuperTV",
+    "labelEn": "SuperTV"
+  },
+  "settings": [
+    {
+      "key": "connection",
+      "type": "section",
+      "label": "Conexión",
+      "labelEn": "Connection",
+      "hint": "Los servidores se obtienen solos. Cambia de uno si va mal.",
+      "hintEn": "Servers are picked automatically. Switch if one misbehaves."
+    },
+    {
+      "key": "status",
+      "type": "status",
+      "label": "Servidor activo",
+      "labelEn": "Active server"
+    },
+    {
+      "key": "switchServer",
+      "type": "action",
+      "label": "Cambiar servidor",
+      "labelEn": "Switch server",
+      "hint": "Prueba el siguiente de la lista",
+      "hintEn": "Tries the next one in the list"
+    },
+    {
+      "key": "refreshServers",
+      "type": "action",
+      "label": "Actualizar lista de servidores",
+      "labelEn": "Update server list",
+      "hint": "Vuelve a pedir la lista al servicio",
+      "hintEn": "Asks the service for the list again"
+    },
+    {
+      "key": "content",
+      "type": "section",
+      "label": "Contenido",
+      "labelEn": "Content"
+    },
+    {
+      "key": "showAdult",
+      "type": "toggle",
+      "default": false,
+      "label": "Mostrar contenido 18+",
+      "labelEn": "Show 18+ content",
+      "hint": "Apagado, las categorías adultas se ocultan",
+      "hintEn": "Off, adult categories are hidden"
+    },
+    {
+      "key": "liveSection",
+      "type": "section",
+      "label": "En vivo",
+      "labelEn": "Live"
+    },
+    {
+      "key": "liveFormat",
+      "type": "select",
+      "default": "m3u8",
+      "options": [
+        {
+          "value": "m3u8",
+          "label": "HLS (m3u8)",
+          "labelEn": "HLS (m3u8)"
+        },
+        {
+          "value": "ts",
+          "label": "MPEG-TS (ts)",
+          "labelEn": "MPEG-TS (ts)"
+        }
+      ],
+      "hint": "Si un canal no carga, prueba el otro",
+      "hintEn": "If a channel will not play, try the other",
+      "label": "Formato del en vivo",
+      "labelEn": "Live format"
+    }
+  ],
+  "enhancements": {
+    "14": {
+      "capabilities": [
+        "screen"
+      ],
+      "screen": {
+        "label": "SuperTV",
+        "labelEn": "SuperTV",
+        "icon": "tv",
+        "menuOpens": "screen",
+        "opensFrom": [
+          "menu",
+          "settings"
+        ],
+        "settingsButton": {
+          "label": "Abrir SuperTV",
+          "labelEn": "Open SuperTV"
+        },
+        "settingsIn": "screen"
+      },
+      "settings": [
+        {
+          "key": "connection",
+          "type": "section",
+          "label": "Conexión",
+          "labelEn": "Connection",
+          "hint": "Los servidores se obtienen solos. Cambia de uno si va mal.",
+          "hintEn": "Servers are picked automatically. Switch if one misbehaves."
+        },
+        {
+          "key": "status",
+          "type": "status",
+          "label": "Servidor activo",
+          "labelEn": "Active server"
+        },
+        {
+          "key": "switchServer",
+          "type": "action",
+          "label": "Cambiar servidor",
+          "labelEn": "Switch server",
+          "hint": "Prueba el siguiente de la lista",
+          "hintEn": "Tries the next one in the list"
+        },
+        {
+          "key": "refreshServers",
+          "type": "action",
+          "label": "Actualizar lista de servidores",
+          "labelEn": "Update server list",
+          "hint": "Vuelve a pedir la lista al servicio",
+          "hintEn": "Asks the service for the list again"
+        },
+        {
+          "key": "content",
+          "type": "section",
+          "label": "Contenido",
+          "labelEn": "Content"
+        },
+        {
+          "key": "showAdult",
+          "type": "toggle",
+          "default": false,
+          "label": "Mostrar contenido 18+",
+          "labelEn": "Show 18+ content",
+          "hint": "Apagado, las categorías adultas se ocultan",
+          "hintEn": "Off, adult categories are hidden",
+          "unlockWith": "adultCode"
+        },
+        {
+          "key": "liveSection",
+          "type": "section",
+          "label": "En vivo",
+          "labelEn": "Live"
+        },
+        {
+          "key": "liveFormat",
+          "type": "select",
+          "default": "m3u8",
+          "options": [
+            {
+              "value": "m3u8",
+              "label": "HLS (m3u8)",
+              "labelEn": "HLS (m3u8)"
+            },
+            {
+              "value": "ts",
+              "label": "MPEG-TS (ts)",
+              "labelEn": "MPEG-TS (ts)"
+            }
+          ],
+          "hint": "Si un canal no carga, prueba el otro",
+          "hintEn": "If a channel will not play, try the other",
+          "label": "Formato del en vivo",
+          "labelEn": "Live format"
+        }
+      ]
+    },
+    "19": {
+      "capabilities": [
+        "screen"
+      ]
+    }
+  },
+  "signature": {
+    "authorKey": "6693946bd5c56196960959c4b9665fad5094374bcb85ddb282f8bf762c835263",
+    "value": "e680abaf9e00adfbdd8a68723e15cab66e7086c1ce5819e971d0624dcb789ecbb2b1aa05dc6d0f928543be514b440d5605333846add420f62eb4c052018bd60f"
+  }
+}

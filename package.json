@@ -1,0 +1,16 @@
+{
+  "name": "kino-plugin-supertv",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/plugin.js --bundle --format=esm --target=es2020 --outfile=plugin.js",
+    "validate": "npm run build && node sdk/validate.mjs . && node scripts/check-quickjs.mjs",
+    "check:quickjs": "node scripts/check-quickjs.mjs",
+    "hosts": "node scripts/health-hosts.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "^0.21.0",
+    "quickjs-emscripten": "^0.31.0"
+  },
+  "version": "0.1.0"
+}
