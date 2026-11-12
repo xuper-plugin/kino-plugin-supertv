@@ -6,7 +6,7 @@ import { say, twin } from "./i18n.js";
 import { put } from "./store.js";
 import { TAB_IDS, browseView, searchView, liveView, settingsView, cardOf } from "./screenView.js";
 
-const PLUGIN_VERSION = "0.1.5";
+const PLUGIN_VERSION = "0.1.6";
 const TAB_KEY = "superTab";
 const HIST_KEY = "searchHist:v1";
 const HIST_MAX = 24;
@@ -68,9 +68,12 @@ function serverSheet(servers) {
   const rows = (servers.items || []).slice(0, 60).map((s) => {
     const t = `${s.label === s.host ? s.host : s.label + "  " + s.host}${s.https ? "" : " · http"}`;
     const sel = s.i === cur;
+    const leading = s.flag
+      ? { type: "Image", key: "flag-" + s.i, url: `https://flagcdn.com/w40/${s.flag}.png`, aspect: "4:3", h: 22 }
+      : { type: "Icon", name: "language" };
     return {
-      type: "ListTile", key: "srvrow-" + s.i, title: t, titleEn: t, selected: sel,
-      ...(sel ? { leading: { type: "Icon", name: "check" } } : {}),
+      type: "ListTile", key: "srvrow-" + s.i, title: t, titleEn: t, selected: sel, leading,
+      ...(sel ? { trailing: { type: "Icon", name: "check" } } : {}),
       onTap: { event: "srv.pick", arg: String(s.i) },
     };
   });
@@ -103,11 +106,12 @@ const tabOf = (state, route) => {
   return TAB_IDS.includes(state.tab) ? state.tab : TAB_IDS.includes(a.tab) ? a.tab : storedTab() || TAB_IDS[0];
 };
 
-// Unidades que faltan por cargar en el tab activo: primero las categorías, luego las filas del grupo.
-function unitsFor(tab) { return ["cats", "tab:" + tab]; }
+// Unidades que faltan por cargar en el tab activo: primero las categorías y las filas; el chequeo de salud va al final (segundo plano).
+function unitsFor(tab) { return ["cats", "tab:" + tab, "health"]; }
 
 function isDone(unit) {
   if (unit === "cats") return liveCatsAll !== null;
+  if (unit === "health") return !cat.healthNeeded();
   const [, tab] = unit.split(":");
   return groupRails.has(tab);
 }
@@ -119,6 +123,7 @@ function pendingUnit(state, tab) {
 
 async function runUnit(unit) {
   if (unit === "cats") { liveCatsAll = await cat.liveCategories(); return; }
+  if (unit === "health") { await cat.healthCheck(); return; }
   const [, tab] = unit.split(":");
   await loadGroupTab(tab);
 }
