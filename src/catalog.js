@@ -314,6 +314,16 @@ export async function switchServer() {
   return { changed: false, host: hostOf(st.list[st.idx]), index: st.idx + 1, total: n, https };
 }
 
+// Público hispanohablante: España, México y "Latino" primero, luego el resto de Latinoamérica, luego Global, luego otros países.
+const LATAM = new Set(["ar", "bo", "cl", "co", "cr", "cu", "do", "ec", "gt", "hn", "ni", "pa", "pe", "pr", "py", "sv", "uy", "ve"]);
+function srvPriority(x) {
+  const code = (x.flag || "").toLowerCase();
+  if (code === "es" || code === "mx" || /latino|latam/.test(String(x.label || "").toLowerCase())) return 0;
+  if (LATAM.has(code)) return 1;
+  if (!code) return 2; // Global / sin país
+  return 3;
+}
+
 // La lista para el selector (nunca usuario ni contraseña). Con un chequeo de salud fresco, solo muestra los que responden.
 export async function serverList() {
   const st = await loadServers(false);
@@ -324,6 +334,7 @@ export async function serverList() {
     return { i, label: niceLabel(s), host: hostOf(s), https: String(s.url).startsWith("https://"), flag: fi ? fi.code : "", online: online ? online.has(s.url) : true };
   });
   if (online && online.size > 0) items = items.filter((x) => x.online);
+  items.sort((a, b) => srvPriority(a) - srvPriority(b) || a.i - b.i); // hispanohablantes primero (estable por índice)
   return { current: st.idx, items, checked: !!h };
 }
 

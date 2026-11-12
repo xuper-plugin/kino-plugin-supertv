@@ -688,6 +688,14 @@ async function switchServer() {
   }
   return { changed: false, host: hostOf(st.list[st.idx]), index: st.idx + 1, total: n, https };
 }
+var LATAM = /* @__PURE__ */ new Set(["ar", "bo", "cl", "co", "cr", "cu", "do", "ec", "gt", "hn", "ni", "pa", "pe", "pr", "py", "sv", "uy", "ve"]);
+function srvPriority(x) {
+  const code = (x.flag || "").toLowerCase();
+  if (code === "es" || code === "mx" || /latino|latam/.test(String(x.label || "").toLowerCase())) return 0;
+  if (LATAM.has(code)) return 1;
+  if (!code) return 2;
+  return 3;
+}
 async function serverList() {
   const st = await loadServers(false);
   const h = healthFresh();
@@ -697,6 +705,7 @@ async function serverList() {
     return { i, label: niceLabel(s), host: hostOf(s), https: String(s.url).startsWith("https://"), flag: fi ? fi.code : "", online: online ? online.has(s.url) : true };
   });
   if (online && online.size > 0) items = items.filter((x) => x.online);
+  items.sort((a, b) => srvPriority(a) - srvPriority(b) || a.i - b.i);
   return { current: st.idx, items, checked: !!h };
 }
 async function selectServer(i) {
@@ -1064,6 +1073,9 @@ var TEXTS = Object.freeze({
   partial: ["Algunas filas no cargaron.", "Some rows did not load."],
   searchPartial: ["Resultados parciales: no se revisaron todas las categor\xEDas (el servidor limita las peticiones).", "Partial results: not every category was checked (the server limits requests)."],
   verifying: ["Verificando servidores\u2026", "Checking servers\u2026"],
+  firstPickTitle: ["Elige tu servidor", "Choose your server"],
+  firstPickHint: ["Elige desde d\xF3nde ver. El primero ya est\xE1 listo; puedes elegir otro. Luego lo cambias cuando quieras con el bot\xF3n \u{1F310}.", "Pick where to watch from. The first one is ready; you can choose another. Change it anytime later with the \u{1F310} button."],
+  firstPickContinue: ["Usar este", "Use this one"],
   empty: ["Todav\xEDa no hay canales para mostrar.", "No channels to show yet."],
   failed: ["No se pudo cargar. Revisa tu conexi\xF3n.", "Could not load. Check your connection."],
   setTitle: ["Ajustes de SuperTV", "SuperTV settings"],
@@ -1377,9 +1389,57 @@ function verifyingView({ device } = {}) {
     every: { ms: POLL_MS, event: "tick" }
   };
 }
+function firstPickView({ servers, failed = false, device } = {}) {
+  const appBar = {
+    type: "AppBar",
+    divider: false,
+    mergeWithKinoBar: true,
+    dense: true,
+    leading: barButton("close", "close", "close", { go: { close: true } }),
+    title: title()
+  };
+  if (!servers) {
+    return {
+      type: "Scaffold",
+      appBar,
+      body: { type: "Column", key: "fpLoad", flex: 1, mainAxisAlignment: "center", crossAxisAlignment: "center", gap: 16, padding: { compact: 24, expanded: 48 }, children: failed ? [{ type: "MaterialBanner", key: "fpFail", role: "error", ...twin("failed"), action: { ...twin("retry", "label"), onTap: "retry" } }] : [{ type: "CircularProgressIndicator", key: "fpSpin" }, { type: "Text", ...twin("verifying", "text"), textAlign: "center", color: "muted" }] },
+      ...failed ? {} : { every: { ms: POLL_MS, event: "tick" } }
+    };
+  }
+  const items = (servers.items || []).slice(0, 60);
+  const rows = items.map((s, idx) => {
+    const hasCountry = s.label !== s.host;
+    const ttl = hasCountry ? s.label : s.host;
+    const sub = hasCountry ? s.https ? s.host : `${s.host} \xB7 http` : s.https ? "" : "http";
+    const leading = s.flag ? { type: "Image", key: "fpflag-" + s.i, url: `https://flagcdn.com/w40/${s.flag}.png`, w: 32, h: 24 } : { type: "Icon", name: "language" };
+    return {
+      type: "ListTile",
+      key: "fprow-" + s.i,
+      title: ttl,
+      titleEn: ttl,
+      selected: idx === 0,
+      leading,
+      ...sub ? { subtitle: sub, subtitleEn: sub } : {},
+      ...idx === 0 ? { trailing: { type: "Icon", name: "check" } } : {},
+      onTap: { event: "srv.first", arg: String(s.i) }
+    };
+  });
+  const list = items.length ? rows : [{ type: "Text", key: "fpEmpty", ...twin("liveEmpty", "text"), color: "muted" }];
+  return {
+    type: "Scaffold",
+    appBar,
+    body: { type: "Column", key: "fpPage", flex: 1, children: [
+      { type: "SingleChildScrollView", key: "fpScroll", flex: 1, children: [{ type: "Column", padding: { compact: 16, expanded: 24 }, gap: 12, children: [
+        { type: "Text", ...twin("firstPickTitle", "text"), style: "h4" },
+        { type: "Text", ...twin("firstPickHint", "text"), color: "muted" },
+        ...list
+      ] }] }
+    ] }
+  };
+}
 
 // src/screen.js
-var PLUGIN_VERSION = "0.1.12";
+var PLUGIN_VERSION = "0.1.13";
 var TAB_KEY = "superTab";
 var HIST_KEY = "searchHist:v1";
 var HIST_MAX = 24;
@@ -1392,7 +1452,16 @@ var groupRails = /* @__PURE__ */ new Map();
 var liveChans = /* @__PURE__ */ new Map();
 var liveCatsAll = null;
 var found = null;
+var pickServers = null;
 var cacheKey = null;
+var SRVCHOSEN_KEY = "srvChosen:v1";
+var serverChosen = () => getStored(SRVCHOSEN_KEY) === "1";
+var markServerChosen = () => {
+  try {
+    put(SRVCHOSEN_KEY, "1");
+  } catch (_) {
+  }
+};
 function resetCaches() {
   groupRails.clear();
   liveChans.clear();
@@ -1493,11 +1562,12 @@ var tabOf = (state, route) => {
   return TAB_IDS.includes(state.tab) ? state.tab : TAB_IDS.includes(a.tab) ? a.tab : storedTab() || TAB_IDS[0];
 };
 function unitsFor(tab) {
-  return ["health", "cats", "tab:" + tab];
+  return serverChosen() ? ["health", "cats", "tab:" + tab] : ["health", "pick"];
 }
 function isDone(unit) {
   if (unit === "cats") return liveCatsAll !== null;
   if (unit === "health") return healthReady();
+  if (unit === "pick") return pickServers !== null;
   const [, tab] = unit.split(":");
   return groupRails.has(tab);
 }
@@ -1514,12 +1584,17 @@ async function runUnit(unit) {
     await healthCheck();
     return;
   }
+  if (unit === "pick") {
+    pickServers = await serverList();
+    return;
+  }
   const [, tab] = unit.split(":");
   await loadGroupTab(tab);
 }
 function mainView(ctx) {
   const state = ctx.state || {};
   if (!healthReady() && !(state.failed && state.failed.health)) return verifyingView({ device: ctx.device });
+  if (!serverChosen()) return firstPickView({ servers: pickServers, failed: !!(state.failed && state.failed.pick), device: ctx.device });
   const tab = tabOf(state, ctx.route);
   const data = groupRails.get(tab) || null;
   const failed = unitsFor(tab).some((u) => state.failed && state.failed[u]);
@@ -1712,6 +1787,17 @@ var events = {
       servers = { current: -1, items: [] };
     }
     return { state: { ...bump(state), failed: null, servers }, sheet: serverSheet(servers), toast: { text: say(r.ok ? "srvSelected" : "srvSelectFail", lang, { host: r.host || r.label || "" }), role: r.ok ? "success" : "error" } };
+  },
+  // Elegido un servidor en el selector de la primera vez: lo fija, lo recuerda y manda al Home (que ya carga con ese servidor).
+  // Si no respondió, se queda en el selector (con el aviso) para elegir otro.
+  async "srv.first"({ arg, state, lang }) {
+    const r = await selectServer(arg);
+    if (r.ok) {
+      resetCaches();
+      cacheKey = serverKey();
+      markServerChosen();
+    }
+    return { state: { ...bump(state), failed: null }, toast: { text: say(r.ok ? "srvSelected" : "srvSelectFail", lang, { host: r.host || r.label || "" }), role: r.ok ? "success" : "error" } };
   },
   saved({ state }) {
     return { state: bump(state) };

@@ -4,9 +4,9 @@
 import * as cat from "./catalog.js";
 import { say, twin } from "./i18n.js";
 import { put } from "./store.js";
-import { TAB_IDS, browseView, searchView, liveView, settingsView, verifyingView, cardOf } from "./screenView.js";
+import { TAB_IDS, browseView, searchView, liveView, settingsView, verifyingView, firstPickView, cardOf } from "./screenView.js";
 
-const PLUGIN_VERSION = "0.1.12";
+const PLUGIN_VERSION = "0.1.13";
 const TAB_KEY = "superTab";
 const HIST_KEY = "searchHist:v1";
 const HIST_MAX = 24;
@@ -22,7 +22,13 @@ const groupRails = new Map(); // grupo -> { rails: [{ id, catId, title, items }]
 const liveChans = new Map();  // categoría -> tarjetas de canal (drilldown)
 let liveCatsAll = null;       // [{ id, title, group, country?, genre?, adult? }]
 let found = null;             // búsqueda de canales: { q, items, partial }
+let pickServers = null;       // lista para el selector de servidor de la primera vez (null = aún sin cargar)
 let cacheKey = null;
+
+// La persona ya eligió servidor al menos una vez: se recuerda para no volver a mostrar el selector inicial (se cambia con 🌐).
+const SRVCHOSEN_KEY = "srvChosen:v1";
+const serverChosen = () => getStored(SRVCHOSEN_KEY) === "1";
+const markServerChosen = () => { try { put(SRVCHOSEN_KEY, "1"); } catch (_) { /* da igual */ } };
 
 function resetCaches() {
   groupRails.clear();
@@ -109,12 +115,14 @@ const tabOf = (state, route) => {
   return TAB_IDS.includes(state.tab) ? state.tab : TAB_IDS.includes(a.tab) ? a.tab : storedTab() || TAB_IDS[0];
 };
 
-// Unidades que faltan por cargar en el tab activo: primero las categorías y las filas; el chequeo de salud va al final (segundo plano).
-function unitsFor(tab) { return ["health", "cats", "tab:" + tab]; }
+// Unidades que faltan por cargar. Sin servidor elegido aún: solo salud y la lista para el selector inicial (no se carga el Home
+// hasta que la persona elija, para no entrar con un servidor al azar). Ya elegido: salud, categorías y las filas del tab.
+function unitsFor(tab) { return serverChosen() ? ["health", "cats", "tab:" + tab] : ["health", "pick"]; }
 
 function isDone(unit) {
   if (unit === "cats") return liveCatsAll !== null;
   if (unit === "health") return cat.healthReady();
+  if (unit === "pick") return pickServers !== null;
   const [, tab] = unit.split(":");
   return groupRails.has(tab);
 }
@@ -127,6 +135,7 @@ function pendingUnit(state, tab) {
 async function runUnit(unit) {
   if (unit === "cats") { liveCatsAll = await cat.liveCategories(); return; }
   if (unit === "health") { await cat.healthCheck(); return; }
+  if (unit === "pick") { pickServers = await cat.serverList(); return; }
   const [, tab] = unit.split(":");
   await loadGroupTab(tab);
 }
@@ -135,6 +144,8 @@ function mainView(ctx) {
   const state = ctx.state || {};
   // Antes del Home: si aún no se verificaron los servidores (y no falló el chequeo), muestra "Verificando servidores…".
   if (!cat.healthReady() && !(state.failed && state.failed.health)) return verifyingView({ device: ctx.device });
+  // Primera vez: la persona elige servidor antes de entrar (no se toma uno al azar). Después se recuerda y se salta directo al Home.
+  if (!serverChosen()) return firstPickView({ servers: pickServers, failed: !!(state.failed && state.failed.pick), device: ctx.device });
   const tab = tabOf(state, ctx.route);
   const data = groupRails.get(tab) || null;
   const failed = unitsFor(tab).some((u) => state.failed && state.failed[u]);
@@ -284,6 +295,13 @@ const events = {
     let servers;
     try { servers = await cat.serverList(); } catch (_) { servers = { current: -1, items: [] }; }
     return { state: { ...bump(state), failed: null, servers }, sheet: serverSheet(servers), toast: { text: say(r.ok ? "srvSelected" : "srvSelectFail", lang, { host: r.host || r.label || "" }), role: r.ok ? "success" : "error" } };
+  },
+  // Elegido un servidor en el selector de la primera vez: lo fija, lo recuerda y manda al Home (que ya carga con ese servidor).
+  // Si no respondió, se queda en el selector (con el aviso) para elegir otro.
+  async "srv.first"({ arg, state, lang }) {
+    const r = await cat.selectServer(arg);
+    if (r.ok) { resetCaches(); cacheKey = cat.serverKey(); markServerChosen(); }
+    return { state: { ...bump(state), failed: null }, toast: { text: say(r.ok ? "srvSelected" : "srvSelectFail", lang, { host: r.host || r.label || "" }), role: r.ok ? "success" : "error" } };
   },
   saved({ state }) { return { state: bump(state) }; },
 };
