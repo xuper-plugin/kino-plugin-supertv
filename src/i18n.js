@@ -22,6 +22,7 @@ export const TEXTS = Object.freeze({
   liveMore: ["Se muestran los primeros {n}. Usa la búsqueda para encontrar otros.", "Showing the first {n}. Use search to find others."],
   partial: ["Algunas filas no cargaron.", "Some rows did not load."],
   searchPartial: ["Resultados parciales: no se revisaron todas las categorías (el servidor limita las peticiones).", "Partial results: not every category was checked (the server limits requests)."],
+  verifying: ["Verificando servidores…", "Checking servers…"],
   empty: ["Todavía no hay canales para mostrar.", "No channels to show yet."],
   failed: ["No se pudo cargar. Revisa tu conexión.", "Could not load. Check your connection."],
   setTitle: ["Ajustes de SuperTV", "SuperTV settings"],

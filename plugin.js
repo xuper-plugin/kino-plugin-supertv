@@ -729,7 +729,7 @@ var healthFresh = () => {
   const h = readHealth();
   return h && Date.now() - h.ts < HEALTH_TTL_MS ? h : null;
 };
-var healthNeeded = () => !healthFresh() && !healthRunning;
+var healthReady = () => !!healthFresh();
 var probeAlive = async (srv) => {
   try {
     await callServer(srv, "get_live_categories", {});
@@ -759,6 +759,12 @@ async function healthCheck() {
       }
     }
     return online.length;
+  } catch (_) {
+    try {
+      put(HEALTH_KEY, JSON.stringify({ ts: Date.now(), online: [] }));
+    } catch (__) {
+    }
+    return 0;
   } finally {
     healthRunning = false;
   }
@@ -1017,6 +1023,7 @@ var TEXTS = Object.freeze({
   liveMore: ["Se muestran los primeros {n}. Usa la b\xFAsqueda para encontrar otros.", "Showing the first {n}. Use search to find others."],
   partial: ["Algunas filas no cargaron.", "Some rows did not load."],
   searchPartial: ["Resultados parciales: no se revisaron todas las categor\xEDas (el servidor limita las peticiones).", "Partial results: not every category was checked (the server limits requests)."],
+  verifying: ["Verificando servidores\u2026", "Checking servers\u2026"],
   empty: ["Todav\xEDa no hay canales para mostrar.", "No channels to show yet."],
   failed: ["No se pudo cargar. Revisa tu conexi\xF3n.", "Could not load. Check your connection."],
   setTitle: ["Ajustes de SuperTV", "SuperTV settings"],
@@ -1312,9 +1319,27 @@ function settingsView({ srv, servers, busy, pluginVersion, appVersion, device })
     ...!srv ? { every: { ms: 1e3, event: "sstatus" } } : {}
   };
 }
+function verifyingView({ device } = {}) {
+  return {
+    type: "Scaffold",
+    appBar: {
+      type: "AppBar",
+      divider: false,
+      mergeWithKinoBar: true,
+      dense: true,
+      leading: barButton("close", "close", "close", { go: { close: true } }),
+      title: title()
+    },
+    body: { type: "Column", key: "verifying", flex: 1, mainAxisAlignment: "center", crossAxisAlignment: "center", gap: 16, padding: { compact: 24, expanded: 48 }, children: [
+      { type: "CircularProgressIndicator", key: "verifySpin" },
+      { type: "Text", ...twin("verifying", "text"), textAlign: "center", color: "muted" }
+    ] },
+    every: { ms: POLL_MS, event: "tick" }
+  };
+}
 
 // src/screen.js
-var PLUGIN_VERSION = "0.1.6";
+var PLUGIN_VERSION = "0.1.7";
 var TAB_KEY = "superTab";
 var HIST_KEY = "searchHist:v1";
 var HIST_MAX = 24;
@@ -1425,11 +1450,11 @@ var tabOf = (state, route) => {
   return TAB_IDS.includes(state.tab) ? state.tab : TAB_IDS.includes(a.tab) ? a.tab : storedTab() || TAB_IDS[0];
 };
 function unitsFor(tab) {
-  return ["cats", "tab:" + tab, "health"];
+  return ["health", "cats", "tab:" + tab];
 }
 function isDone(unit) {
   if (unit === "cats") return liveCatsAll !== null;
-  if (unit === "health") return !healthNeeded();
+  if (unit === "health") return healthReady();
   const [, tab] = unit.split(":");
   return groupRails.has(tab);
 }
@@ -1451,6 +1476,7 @@ async function runUnit(unit) {
 }
 function mainView(ctx) {
   const state = ctx.state || {};
+  if (!healthReady() && !(state.failed && state.failed.health)) return verifyingView({ device: ctx.device });
   const tab = tabOf(state, ctx.route);
   const data = groupRails.get(tab) || null;
   const failed = unitsFor(tab).some((u) => state.failed && state.failed[u]);

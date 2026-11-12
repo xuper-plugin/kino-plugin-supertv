@@ -235,3 +235,20 @@ export function settingsView({ srv, servers, busy, pluginVersion, appVersion, de
     ...(!srv ? { every: { ms: 1_000, event: "sstatus" } } : {}),
   };
 }
+
+// Pantalla previa al Home mientras se verifican los servidores (health check). El tick dispara el chequeo.
+export function verifyingView({ device } = {}) {
+  return {
+    type: "Scaffold",
+    appBar: {
+      type: "AppBar", divider: false, mergeWithKinoBar: true, dense: true,
+      leading: barButton("close", "close", "close", { go: { close: true } }),
+      title: title(),
+    },
+    body: { type: "Column", key: "verifying", flex: 1, mainAxisAlignment: "center", crossAxisAlignment: "center", gap: 16, padding: { compact: 24, expanded: 48 }, children: [
+      { type: "CircularProgressIndicator", key: "verifySpin" },
+      { type: "Text", ...twin("verifying", "text"), textAlign: "center", color: "muted" },
+    ] },
+    every: { ms: POLL_MS, event: "tick" },
+  };
+}

@@ -4,9 +4,9 @@
 import * as cat from "./catalog.js";
 import { say, twin } from "./i18n.js";
 import { put } from "./store.js";
-import { TAB_IDS, browseView, searchView, liveView, settingsView, cardOf } from "./screenView.js";
+import { TAB_IDS, browseView, searchView, liveView, settingsView, verifyingView, cardOf } from "./screenView.js";
 
-const PLUGIN_VERSION = "0.1.6";
+const PLUGIN_VERSION = "0.1.7";
 const TAB_KEY = "superTab";
 const HIST_KEY = "searchHist:v1";
 const HIST_MAX = 24;
@@ -107,11 +107,11 @@ const tabOf = (state, route) => {
 };
 
 // Unidades que faltan por cargar en el tab activo: primero las categorías y las filas; el chequeo de salud va al final (segundo plano).
-function unitsFor(tab) { return ["cats", "tab:" + tab, "health"]; }
+function unitsFor(tab) { return ["health", "cats", "tab:" + tab]; }
 
 function isDone(unit) {
   if (unit === "cats") return liveCatsAll !== null;
-  if (unit === "health") return !cat.healthNeeded();
+  if (unit === "health") return cat.healthReady();
   const [, tab] = unit.split(":");
   return groupRails.has(tab);
 }
@@ -130,6 +130,8 @@ async function runUnit(unit) {
 
 function mainView(ctx) {
   const state = ctx.state || {};
+  // Antes del Home: si aún no se verificaron los servidores (y no falló el chequeo), muestra "Verificando servidores…".
+  if (!cat.healthReady() && !(state.failed && state.failed.health)) return verifyingView({ device: ctx.device });
   const tab = tabOf(state, ctx.route);
   const data = groupRails.get(tab) || null;
   const failed = unitsFor(tab).some((u) => state.failed && state.failed[u]);
