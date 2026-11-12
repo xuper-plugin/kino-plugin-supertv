@@ -6,7 +6,7 @@ import { say, twin } from "./i18n.js";
 import { put } from "./store.js";
 import { TAB_IDS, browseView, searchView, liveView, settingsView, cardOf } from "./screenView.js";
 
-const PLUGIN_VERSION = "0.1.3";
+const PLUGIN_VERSION = "0.1.4";
 const TAB_KEY = "superTab";
 const HIST_KEY = "searchHist:v1";
 const HIST_MAX = 24;
@@ -61,6 +61,22 @@ function rememberFound(cards) {
 const channelCard = (i) => ({ id: i.id, ref: i.ref, title: i.title, kind: "live", poster: i.logo, ...(i.adult ? { adult: true } : {}) });
 const cardsOf = (items) => (Array.isArray(items) ? items : []).filter((i) => i && typeof i.id === "string" && typeof i.ref === "string").slice(0, CHANNELS_CAP).map(cardOf);
 const bump = (state) => ({ n: (state.n || 0) + 1 });
+
+// El sheet del selector de servidor: un ✓ y resalte en el servidor activo.
+function serverSheet(servers) {
+  const cur = servers.current;
+  const rows = (servers.items || []).slice(0, 60).map((s) => {
+    const t = `${s.label === s.host ? s.host : s.label + "  " + s.host}${s.https ? "" : " · http"}`;
+    const sel = s.i === cur;
+    return {
+      type: "ListTile", key: "srvrow-" + s.i, title: t, titleEn: t, selected: sel,
+      ...(sel ? { leading: { type: "Icon", name: "check" } } : {}),
+      onTap: { event: "srv.pick", arg: String(s.i) },
+    };
+  });
+  const body = rows.length ? rows : [{ type: "Text", key: "srvEmpty", ...twin("liveEmpty", "text") }];
+  return { ...twin("setPick", "title"), body };
+}
 
 // Cada fila es una petición y el servidor IPTV admite 60 por minuto: se piden pocas categorías y pocos canales por fila.
 async function loadGroupTab(tab) {
@@ -249,22 +265,15 @@ const events = {
   async openServers() {
     let servers;
     try { servers = await cat.serverList(); } catch (_) { servers = { current: -1, items: [] }; }
-    const rows = servers.items.slice(0, 60).map((s) => {
-      const t = `${s.label === s.host ? s.host : s.label + "  " + s.host}${s.https ? "" : " · http"}`;
-      return {
-        type: "ListTile", key: "srvrow-" + s.i, title: t, titleEn: t,
-        leading: { type: "Icon", name: s.i === servers.current ? "check" : "language" },
-        onTap: { event: "srv.pick", arg: String(s.i) },
-      };
-    });
-    const body = rows.length ? rows : [{ type: "Text", key: "srvEmpty", ...twin("liveEmpty", "text") }];
-    return { state: { servers }, sheet: { ...twin("setPick", "title"), body } };
+    return { state: { servers }, sheet: serverSheet(servers) };
   },
-  // Elegido un servidor en el modal: fijar, cerrar el modal, limpiar cachés y recargar el tab actual con ese servidor.
+  // Elegido un servidor: fijar, recargar el Home por debajo y re-dibujar el sheet con el ✓ en el elegido (NO cerrar el plugin).
   async "srv.pick"({ arg, state, lang }) {
     const r = await cat.selectServer(arg);
     if (r.ok) { resetCaches(); cacheKey = cat.serverKey(); }
-    return { close: true, state: { ...bump(state), failed: null }, toast: { text: say(r.ok ? "srvSelected" : "srvSelectFail", lang, { host: r.label || r.host || "" }), role: r.ok ? "success" : "error" } };
+    let servers;
+    try { servers = await cat.serverList(); } catch (_) { servers = { current: -1, items: [] }; }
+    return { state: { ...bump(state), failed: null, servers }, sheet: serverSheet(servers), toast: { text: say(r.ok ? "srvSelected" : "srvSelectFail", lang, { host: r.label || r.host || "" }), role: r.ok ? "success" : "error" } };
   },
   saved({ state }) { return { state: bump(state) }; },
 };
