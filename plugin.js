@@ -1338,7 +1338,7 @@ function verifyingView({ device } = {}) {
 }
 
 // src/screen.js
-var PLUGIN_VERSION = "0.1.8";
+var PLUGIN_VERSION = "0.1.9";
 var TAB_KEY = "superTab";
 var HIST_KEY = "searchHist:v1";
 var HIST_MAX = 24;
@@ -1714,9 +1714,6 @@ async function section2(arg) {
   }
   return { tabs: SECTION_TABS.map((t) => ({ id: t.id, label: english ? t.en : t.label })), tab, rows };
 }
-
-// src/plugin.js
-globalThis.__kinoDropPendingFetches = true;
 export {
   action,
   browse,
