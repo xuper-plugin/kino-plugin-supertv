@@ -182,7 +182,7 @@ const caption = (key, extra = {}, vars) => text(key, { style: "caption", color: 
 const section = (key) => text(key, { style: "h4" });
 const press = (event, arg) => ({ event, ...(arg !== undefined ? { arg } : {}), timeoutMs: PRESS_MS });
 
-export function settingsView({ srv, busy, pluginVersion, appVersion, device }) {
+export function settingsView({ srv, servers, busy, pluginVersion, appVersion, device }) {
   const status = !srv ? { badge: "checking", sub: null }
     : !srv.host ? { badge: "setServerNone", sub: null }
       : { badge: srv.ok ? "setServerOk" : "setServerDown", sub: srv.total ? twin("setServerPos", "subtitle", { i: srv.index, n: srv.total }) : null };
@@ -204,6 +204,12 @@ export function settingsView({ srv, busy, pluginVersion, appVersion, device }) {
         caption("setConnectionHint"),
         { type: "ListTile", key: "serverRow", ...twin("setServer", "title"), ...(status.sub || {}), leading: { type: "Icon", name: "language" },
           trailing: { type: "Badge", ...twin(status.badge) } },
+        ...(servers && Array.isArray(servers.items) && servers.items.length > 1 ? [
+          { type: "DropdownButton", key: "serverPick", ...twin("setPick", "labelText"), value: String(servers.current),
+            onChanged: "srv.select", enabled: !busy,
+            options: servers.items.slice(0, 60).map((s) => { const t = `${s.label}  ${s.host}${s.https ? "" : " · http"}`; return { value: String(s.i), label: t, labelEn: t }; }) },
+          caption("setPickHint"),
+        ] : []),
         { type: "Row", wrap: true, gap: 8, children: [
           { type: "ElevatedButton", key: "switchServer", ...twin("setSwitch", "labelText"), icon: "refresh", ...twin("setSwitchHint", "tooltip"), enabled: !busy, onPressed: press("srv.switch") },
           { type: "Button", variant: "secondary", key: "refreshServers", ...twin("setRefresh", "labelText"), icon: "download", ...twin("setRefreshHint", "tooltip"), enabled: !busy, onPressed: press("srv.refresh") },

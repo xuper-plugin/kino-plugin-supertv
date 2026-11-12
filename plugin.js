@@ -428,7 +428,8 @@ function parseServerLine(line) {
     const password = u.searchParams.get("password") || u.searchParams.get("pass") || "";
     if (!username) return null;
     const base = (u.protocol + "//" + u.host).replace(/\/+$/, "");
-    return { url: base, username, password };
+    const name = line.slice(url.length).trim().replace(/^\[|\]$/g, "").trim().slice(0, 40);
+    return { url: base, username, password, ...name ? { name } : {} };
   } catch (_) {
     return null;
   }
@@ -628,6 +629,7 @@ var hostOf = (srv) => {
     return "";
   }
 };
+var labelOf = (srv) => srv && srv.name ? srv.name : hostOf(srv);
 async function serverStatus() {
   const cached = readSrvs();
   if (cached && cached.ok && cached.list && cached.list[cached.idx] && Date.now() - (cached.okAt || 0) < 2e4) return { ok: true, host: hostOf(cached.list[cached.idx]), index: cached.idx + 1, total: cached.list.length, at: cached.okAt };
@@ -660,6 +662,31 @@ async function switchServer() {
     }
   }
   return { changed: false, host: hostOf(st.list[st.idx]), index: st.idx + 1, total: n, https };
+}
+async function serverList() {
+  const st = await loadServers(false);
+  return {
+    current: st.idx,
+    items: (st.list || []).map((s, i) => ({ i, label: labelOf(s), host: hostOf(s), https: String(s.url).startsWith("https://") }))
+  };
+}
+async function selectServer(i) {
+  const st = await loadServers(false);
+  const n = st.list.length;
+  const idx = parseInt(i, 10);
+  if (!(idx >= 0 && idx < n)) return { ok: false };
+  try {
+    await callServer(st.list[idx], "get_live_categories", {});
+    st.idx = idx;
+    st.ok = true;
+    st.okAt = Date.now();
+    st.pin = idx !== homeIdx(st);
+    writeSrvs(st);
+    return { ok: true, host: hostOf(st.list[idx]), label: labelOf(st.list[idx]), index: idx + 1, total: n };
+  } catch (e) {
+    lastErr = errText(e);
+    return { ok: false, host: hostOf(st.list[idx]), label: labelOf(st.list[idx]), index: idx + 1, total: n };
+  }
 }
 async function refreshServers() {
   const before = readSrvs();
@@ -925,6 +952,10 @@ var TEXTS = Object.freeze({
   setServerDown: ["Sin respuesta", "No answer"],
   setServerNone: ["Sin servidores", "No servers"],
   setServerPos: ["{i} de {n} en la lista", "{i} of {n} in the list"],
+  setPick: ["Elegir servidor", "Choose server"],
+  setPickHint: ["Cada servidor trae la bandera de su pa\xEDs (\u{1F1F2}\u{1F1FD}, \u{1F1EA}\u{1F1F8}, \u{1F310}). Elige el tuyo; si uno no trae buenos canales o logos, prueba otro.", "Each server shows its country flag (\u{1F1F2}\u{1F1FD}, \u{1F1EA}\u{1F1F8}, \u{1F310}). Pick yours; if one has poor channels or logos, try another."],
+  srvSelected: ["Servidor fijado: {host}", "Server set: {host}"],
+  srvSelectFail: ["No respondi\xF3 {host}. Prueba otro.", "{host} did not answer. Try another."],
   setSwitch: ["Cambiar servidor", "Switch server"],
   setSwitchHint: ["Prueba el siguiente servidor de la lista.", "Tries the next server in the list."],
   setRefresh: ["Actualizar lista de servidores", "Update server list"],
@@ -1140,7 +1171,7 @@ var text = (key, extra = {}, vars) => ({ type: "Text", ...twin(key, "text", vars
 var caption = (key, extra = {}, vars) => text(key, { style: "caption", color: "muted", ...extra }, vars);
 var section = (key) => text(key, { style: "h4" });
 var press = (event, arg) => ({ event, ...arg !== void 0 ? { arg } : {}, timeoutMs: PRESS_MS });
-function settingsView({ srv, busy, pluginVersion, appVersion, device }) {
+function settingsView({ srv, servers, busy, pluginVersion, appVersion, device }) {
   const status = !srv ? { badge: "checking", sub: null } : !srv.host ? { badge: "setServerNone", sub: null } : { badge: srv.ok ? "setServerOk" : "setServerDown", sub: srv.total ? twin("setServerPos", "subtitle", { i: srv.index, n: srv.total }) : null };
   const deviceName = device === "tv" ? ["televisor", "TV"] : device === "desktop" ? ["computador", "desktop"] : ["tel\xE9fono", "phone"];
   const rows = [
@@ -1166,6 +1197,21 @@ function settingsView({ srv, busy, pluginVersion, appVersion, device }) {
           leading: { type: "Icon", name: "language" },
           trailing: { type: "Badge", ...twin(status.badge) }
         },
+        ...servers && Array.isArray(servers.items) && servers.items.length > 1 ? [
+          {
+            type: "DropdownButton",
+            key: "serverPick",
+            ...twin("setPick", "labelText"),
+            value: String(servers.current),
+            onChanged: "srv.select",
+            enabled: !busy,
+            options: servers.items.slice(0, 60).map((s) => {
+              const t = `${s.label}  ${s.host}${s.https ? "" : " \xB7 http"}`;
+              return { value: String(s.i), label: t, labelEn: t };
+            })
+          },
+          caption("setPickHint")
+        ] : [],
         { type: "Row", wrap: true, gap: 8, children: [
           { type: "ElevatedButton", key: "switchServer", ...twin("setSwitch", "labelText"), icon: "refresh", ...twin("setSwitchHint", "tooltip"), enabled: !busy, onPressed: press("srv.switch") },
           { type: "Button", variant: "secondary", key: "refreshServers", ...twin("setRefresh", "labelText"), icon: "download", ...twin("setRefreshHint", "tooltip"), enabled: !busy, onPressed: press("srv.refresh") },
@@ -1192,7 +1238,7 @@ function settingsView({ srv, busy, pluginVersion, appVersion, device }) {
 }
 
 // src/screen.js
-var PLUGIN_VERSION = "0.1.1";
+var PLUGIN_VERSION = "0.1.2";
 var TAB_KEY = "superTab";
 var HIST_KEY = "searchHist:v1";
 var HIST_MAX = 24;
@@ -1333,7 +1379,7 @@ async function screen(ctx) {
       } catch (_) {
         appVersion = "";
       }
-      return settingsView({ srv: state.srv || null, busy: state.busy === true, pluginVersion: PLUGIN_VERSION, appVersion, device: c.device });
+      return settingsView({ srv: state.srv || null, servers: state.servers || null, busy: state.busy === true, pluginVersion: PLUGIN_VERSION, appVersion, device: c.device });
     }
     return mainView({ ...c, state });
   } catch (_) {
@@ -1446,10 +1492,21 @@ var events = {
     return null;
   },
   async sstatus() {
-    return { state: { srv: await serverStatus() } };
+    return { state: { srv: await serverStatus(), servers: await serverList() } };
   },
   async "srv.check"() {
-    return { state: { srv: await serverStatus(), busy: false } };
+    return { state: { srv: await serverStatus(), servers: await serverList(), busy: false } };
+  },
+  async "srv.select"({ value, lang }) {
+    const i = typeof value === "string" ? value : value && typeof value.serverPick === "string" ? value.serverPick : "";
+    const r = await selectServer(i);
+    if (r.ok) {
+      resetCaches();
+      cacheKey = serverKey();
+    }
+    const srv = await serverStatus();
+    const servers = await serverList();
+    return { state: { srv, servers, busy: false }, toast: { text: say(r.ok ? "srvSelected" : "srvSelectFail", lang, { host: r.label || r.host || "" }), role: r.ok ? "success" : "error" } };
   },
   async "srv.switch"({ lang }) {
     const r = await switchServer();

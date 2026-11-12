@@ -6,7 +6,7 @@ import { say } from "./i18n.js";
 import { put } from "./store.js";
 import { TAB_IDS, browseView, searchView, liveView, settingsView, cardOf } from "./screenView.js";
 
-const PLUGIN_VERSION = "0.1.1";
+const PLUGIN_VERSION = "0.1.2";
 const TAB_KEY = "superTab";
 const HIST_KEY = "searchHist:v1";
 const HIST_MAX = 24;
@@ -135,7 +135,7 @@ export async function screen(ctx) {
     if (name === "settings") {
       let appVersion = "";
       try { appVersion = typeof kino.appVersion === "string" ? kino.appVersion : ""; } catch (_) { appVersion = ""; }
-      return settingsView({ srv: state.srv || null, busy: state.busy === true, pluginVersion: PLUGIN_VERSION, appVersion, device: c.device });
+      return settingsView({ srv: state.srv || null, servers: state.servers || null, busy: state.busy === true, pluginVersion: PLUGIN_VERSION, appVersion, device: c.device });
     }
     return mainView({ ...c, state });
   } catch (_) {
@@ -225,8 +225,16 @@ const events = {
     if (arg === "settings") return { route: { push: "settings" }, state: { srv: null, busy: false } };
     return null;
   },
-  async sstatus() { return { state: { srv: await cat.serverStatus() } }; },
-  async "srv.check"() { return { state: { srv: await cat.serverStatus(), busy: false } }; },
+  async sstatus() { return { state: { srv: await cat.serverStatus(), servers: await cat.serverList() } }; },
+  async "srv.check"() { return { state: { srv: await cat.serverStatus(), servers: await cat.serverList(), busy: false } }; },
+  async "srv.select"({ value, lang }) {
+    const i = typeof value === "string" ? value : value && typeof value.serverPick === "string" ? value.serverPick : "";
+    const r = await cat.selectServer(i);
+    if (r.ok) { resetCaches(); cacheKey = cat.serverKey(); }
+    const srv = await cat.serverStatus();
+    const servers = await cat.serverList();
+    return { state: { srv, servers, busy: false }, toast: { text: say(r.ok ? "srvSelected" : "srvSelectFail", lang, { host: r.label || r.host || "" }), role: r.ok ? "success" : "error" } };
+  },
   async "srv.switch"({ lang }) {
     const r = await cat.switchServer();
     const srv = await cat.serverStatus();
