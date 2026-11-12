@@ -6,7 +6,7 @@ import { say, twin } from "./i18n.js";
 import { put } from "./store.js";
 import { TAB_IDS, browseView, searchView, liveView, settingsView, verifyingView, cardOf } from "./screenView.js";
 
-const PLUGIN_VERSION = "0.1.8";
+const PLUGIN_VERSION = "0.1.10";
 const TAB_KEY = "superTab";
 const HIST_KEY = "searchHist:v1";
 const HIST_MAX = 24;
