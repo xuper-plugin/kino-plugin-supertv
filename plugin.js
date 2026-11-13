@@ -1468,7 +1468,7 @@ async function fetchHomeFeed(serverKey2) {
 }
 
 // src/screen.js
-var PLUGIN_VERSION = "0.3.1";
+var PLUGIN_VERSION = "0.3.2";
 var TAB_KEY = "superTab";
 var HIST_KEY = "searchHist:v1";
 var HIST_MAX = 24;
@@ -1989,6 +1989,19 @@ async function section2(arg) {
   const asked = arg && typeof arg === "object" ? arg.tab : null;
   const tab = SECTION_TABS.some((t) => t.id === asked) ? asked : SECTION_TABS[0].id;
   const english = /^en/i.test(String(kino.lang || ""));
+  const tabs = SECTION_TABS.map((t) => ({ id: t.id, label: english ? t.en : t.label }));
+  try {
+    if (!serverKey()) {
+      try {
+        await serverList();
+      } catch (_) {
+      }
+    }
+    const feed = await fetchHomeFeed(serverKey());
+    const fr = feed && feed.tabs && feed.tabs[tab];
+    if (fr && fr.length) return { tabs, tab, rows: fr.map((r) => ({ id: r.id, title: r.title, ref: "lcat:" + r.catId, items: r.items })) };
+  } catch (_) {
+  }
   const cats = (await liveCategories()).filter((c) => inGroup(tab, c)).slice(0, RAILS_PER_TAB);
   const rows = [];
   for (let i = 0; i < cats.length; i += 3) {
@@ -2003,7 +2016,7 @@ async function section2(arg) {
     }));
     rows.push(...batch.filter(Boolean));
   }
-  return { tabs: SECTION_TABS.map((t) => ({ id: t.id, label: english ? t.en : t.label })), tab, rows };
+  return { tabs, tab, rows };
 }
 export {
   action,

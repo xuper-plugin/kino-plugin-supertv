@@ -7,7 +7,7 @@ import { put } from "./store.js";
 import { TAB_IDS, browseView, searchView, liveView, settingsView, verifyingView, firstPickView, cardOf } from "./screenView.js";
 import { fetchHomeFeed } from "./homeFeed.js";
 
-const PLUGIN_VERSION = "0.3.1";
+const PLUGIN_VERSION = "0.3.2";
 const TAB_KEY = "superTab";
 const HIST_KEY = "searchHist:v1";
 const HIST_MAX = 24;
@@ -453,6 +453,18 @@ export async function section(arg) {
   const asked = arg && typeof arg === "object" ? arg.tab : null;
   const tab = SECTION_TABS.some((t) => t.id === asked) ? asked : SECTION_TABS[0].id;
   const english = /^en/i.test(String(kino.lang || ""));
+  const tabs = SECTION_TABS.map((t) => ({ id: t.id, label: english ? t.en : t.label }));
+
+  // Primero el feed pre-armado (1 descarga): así la sección nativa de la pantalla de plugins sale al instante, SIN recorrer el
+  // IPTV. Necesita saber el servidor; si aún no se cargó la lista, se pide una vez (barato). Si no hay feed, cae a la carga en vivo.
+  try {
+    if (!cat.serverKey()) { try { await cat.serverList(); } catch (_) { /* sigue a vivo */ } }
+    const feed = await fetchHomeFeed(cat.serverKey());
+    const fr = feed && feed.tabs && feed.tabs[tab];
+    if (fr && fr.length) return { tabs, tab, rows: fr.map((r) => ({ id: r.id, title: r.title, ref: "lcat:" + r.catId, items: r.items })) };
+  } catch (_) { /* cae a la carga en vivo */ }
+
+  // En vivo (respaldo: sin feed, viejo o falló). Cada fila es una petición al servidor IPTV.
   const cats = (await cat.liveCategories()).filter((c) => inGroup(tab, c)).slice(0, RAILS_PER_TAB);
   const rows = [];
   for (let i = 0; i < cats.length; i += 3) {
@@ -465,5 +477,5 @@ export async function section(arg) {
     }));
     rows.push(...batch.filter(Boolean));
   }
-  return { tabs: SECTION_TABS.map((t) => ({ id: t.id, label: english ? t.en : t.label })), tab, rows };
+  return { tabs, tab, rows };
 }
