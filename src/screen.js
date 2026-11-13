@@ -7,7 +7,7 @@ import { put } from "./store.js";
 import { TAB_IDS, browseView, searchView, liveView, settingsView, verifyingView, firstPickView, cardOf } from "./screenView.js";
 import { fetchHomeFeed } from "./homeFeed.js";
 
-const PLUGIN_VERSION = "0.3.0";
+const PLUGIN_VERSION = "0.3.1";
 const TAB_KEY = "superTab";
 const HIST_KEY = "searchHist:v1";
 const HIST_MAX = 24;
@@ -81,6 +81,21 @@ function rememberFound(cards) {
 const channelCard = (i) => ({ id: i.id, ref: i.ref, title: i.title, kind: "live", poster: i.logo, ...(i.adult ? { adult: true } : {}) });
 const cardsOf = (items) => (Array.isArray(items) ? items : []).filter((i) => i && typeof i.id === "string" && typeof i.ref === "string").slice(0, CHANNELS_CAP).map(cardOf);
 const bump = (state) => ({ n: (state.n || 0) + 1 });
+
+// ---- Home randómico: en cada entrada (open) se renueva la semilla y se baraja el orden de filas y de las tarjetas dentro de
+// cada una. Entre sesiones cambia; dentro de una misma sesión es estable (no salta mientras navega). La fila de eventos no entra aquí.
+let homeSeed = (Math.random() * 2147483647) | 0;
+const newHomeSeed = () => { homeSeed = (Math.random() * 2147483647) | 0; };
+function mulberry32(a) { return function () { a |= 0; a = (a + 0x6d2b79f5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+function shuffleSeeded(arr, seed) {
+  const a = arr.slice();
+  const rnd = mulberry32(seed);
+  for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); const t = a[i]; a[i] = a[j]; a[j] = t; }
+  return a;
+}
+function randomizeRows(rails, seed) {
+  return shuffleSeeded(rails, seed).map((r, i) => (r && Array.isArray(r.items) ? { ...r, items: shuffleSeeded(r.items, (seed + (i + 1) * 0x3c6ef35f) | 0) } : r));
+}
 
 // ---- Feed pre-armado + snapshot en dispositivo ----
 const HOME_SNAP_PREFIX = "homeSnap:";
@@ -244,7 +259,9 @@ function mainView(ctx) {
   const live = groupRails.get(tab) || null;
   const snap = !feedRails && !live ? readSnap(tab) : null;
   let data = feedRails ? { rails: feedRails, partial: false } : live || (snap ? { rails: snap.rails, partial: false, stale: true } : null);
-  // Fila de eventos en vivo arriba del Home (solo tab "all"): se antepone cuando ya cargó, sin duplicar si esa categoría ya está.
+  // Orden randómico (filas y tarjetas), renovado en cada entrada, para que el Home no se vea igual cada vez.
+  if (data && Array.isArray(data.rails)) data = { ...data, rails: randomizeRows(data.rails, homeSeed) };
+  // Fila de eventos en vivo arriba del Home (solo tab "all"): se antepone DESPUÉS del shuffle, así siempre queda de primera.
   if (tab === TAB_IDS[0] && eventsRow) {
     const rest = ((data && data.rails) || []).filter((r) => r.id !== eventsRow.id);
     data = { ...(data || { partial: false }), rails: [eventsRow, ...rest] };
@@ -286,6 +303,7 @@ const events = {
   open({ route, state }) {
     if (route && route.name && route.name !== "main") return null;
     eventsTried = false; // cada entrada al Home vuelve a traer los eventos en vivo (frescos); se mantiene la fila previa hasta que lleguen
+    newHomeSeed();        // cada entrada reordena el Home, para que no se vea igual que la vez anterior
     return { state: { tab: tabOf(state, route), ...bump(state), failed: null } };
   },
   tab({ value, arg, state }) {

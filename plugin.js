@@ -1468,7 +1468,7 @@ async function fetchHomeFeed(serverKey2) {
 }
 
 // src/screen.js
-var PLUGIN_VERSION = "0.3.0";
+var PLUGIN_VERSION = "0.3.1";
 var TAB_KEY = "superTab";
 var HIST_KEY = "searchHist:v1";
 var HIST_MAX = 24;
@@ -1558,6 +1558,33 @@ function rememberFound(cards) {
 var channelCard = (i) => ({ id: i.id, ref: i.ref, title: i.title, kind: "live", poster: i.logo, ...i.adult ? { adult: true } : {} });
 var cardsOf = (items) => (Array.isArray(items) ? items : []).filter((i) => i && typeof i.id === "string" && typeof i.ref === "string").slice(0, CHANNELS_CAP).map(cardOf);
 var bump = (state) => ({ n: (state.n || 0) + 1 });
+var homeSeed = Math.random() * 2147483647 | 0;
+var newHomeSeed = () => {
+  homeSeed = Math.random() * 2147483647 | 0;
+};
+function mulberry32(a) {
+  return function() {
+    a |= 0;
+    a = a + 1831565813 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+function shuffleSeeded(arr, seed) {
+  const a = arr.slice();
+  const rnd = mulberry32(seed);
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(rnd() * (i + 1));
+    const t = a[i];
+    a[i] = a[j];
+    a[j] = t;
+  }
+  return a;
+}
+function randomizeRows(rails, seed) {
+  return shuffleSeeded(rails, seed).map((r, i) => r && Array.isArray(r.items) ? { ...r, items: shuffleSeeded(r.items, seed + (i + 1) * 1013904223 | 0) } : r);
+}
 var HOME_SNAP_PREFIX = "homeSnap:";
 var SNAP_V = 1;
 var SNAP_MAX = 9 * 1024;
@@ -1726,6 +1753,7 @@ function mainView(ctx) {
   const live = groupRails.get(tab) || null;
   const snap = !feedRails && !live ? readSnap(tab) : null;
   let data = feedRails ? { rails: feedRails, partial: false } : live || (snap ? { rails: snap.rails, partial: false, stale: true } : null);
+  if (data && Array.isArray(data.rails)) data = { ...data, rails: randomizeRows(data.rails, homeSeed) };
   if (tab === TAB_IDS[0] && eventsRow) {
     const rest = (data && data.rails || []).filter((r) => r.id !== eventsRow.id);
     data = { ...data || { partial: false }, rails: [eventsRow, ...rest] };
@@ -1769,6 +1797,7 @@ var events = {
   open({ route, state }) {
     if (route && route.name && route.name !== "main") return null;
     eventsTried = false;
+    newHomeSeed();
     return { state: { tab: tabOf(state, route), ...bump(state), failed: null } };
   },
   tab({ value, arg, state }) {
