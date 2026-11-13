@@ -7,7 +7,7 @@ import { put } from "./store.js";
 import { TAB_IDS, browseView, searchView, liveView, settingsView, verifyingView, firstPickView, cardOf } from "./screenView.js";
 import { fetchHomeFeed } from "./homeFeed.js";
 
-const PLUGIN_VERSION = "0.3.3";
+const PLUGIN_VERSION = "0.3.4";
 const TAB_KEY = "superTab";
 const HIST_KEY = "searchHist:v1";
 const HIST_MAX = 24;
@@ -132,7 +132,10 @@ async function autoPick() {
   autoPickTried = true;
   try {
     const list = await cat.serverList();
-    for (const it of (list.items || []).slice(0, 5)) {
+    const items = list.items || [];
+    // La mayoría del público habla español: se prueban primero los servidores en español (es); el resto solo si ninguno responde.
+    const order = [...items.filter((x) => x.es), ...items.filter((x) => !x.es)].slice(0, 6);
+    for (const it of order) {
       const r = await cat.selectServer(String(it.i)).catch(() => ({ ok: false }));
       if (r && r.ok) { markServerChosen(); cacheKey = cat.serverKey(); return; }
     }

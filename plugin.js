@@ -704,7 +704,9 @@ async function serverList() {
   const online = h ? new Set(h.online) : null;
   let items = (st.list || []).map((s, i) => {
     const fi = flagInfo(labelOf(s));
-    return { i, label: niceLabel(s), host: hostOf(s), https: String(s.url).startsWith("https://"), flag: fi ? fi.code : "", online: online ? online.has(s.url) : true };
+    const flag = fi ? fi.code : "";
+    const label = niceLabel(s);
+    return { i, label, host: hostOf(s), https: String(s.url).startsWith("https://"), flag, es: srvPriority({ flag, label }) <= 1, online: online ? online.has(s.url) : true };
   });
   if (online && online.size > 0) items = items.filter((x) => x.online);
   items.sort((a, b) => srvPriority(a) - srvPriority(b) || a.i - b.i);
@@ -1468,7 +1470,7 @@ async function fetchHomeFeed(serverKey2) {
 }
 
 // src/screen.js
-var PLUGIN_VERSION = "0.3.3";
+var PLUGIN_VERSION = "0.3.4";
 var TAB_KEY = "superTab";
 var HIST_KEY = "searchHist:v1";
 var HIST_MAX = 24;
@@ -1619,7 +1621,9 @@ async function autoPick() {
   autoPickTried = true;
   try {
     const list = await serverList();
-    for (const it of (list.items || []).slice(0, 5)) {
+    const items = list.items || [];
+    const order = [...items.filter((x) => x.es), ...items.filter((x) => !x.es)].slice(0, 6);
+    for (const it of order) {
       const r = await selectServer(String(it.i)).catch(() => ({ ok: false }));
       if (r && r.ok) {
         markServerChosen();
