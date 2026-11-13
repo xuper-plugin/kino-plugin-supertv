@@ -8,9 +8,11 @@ var CLASSES = {
   recent: { match: (k) => k.startsWith("recent:"), budget: 30 * 1024 },
   idx: { match: (k) => k.startsWith("idx:"), budget: 6 * 1024 },
   tmdb: { match: (k) => k.startsWith("tmdb:"), budget: 24 * 1024 },
+  // Snapshots de las pestañas (una entrada por servidor+tab): pintan el Home al instante al reabrir, aun sin red.
+  homeSnap: { match: (k) => k.startsWith("homeSnap:"), budget: 40 * 1024 },
   misc: { match: () => true, budget: 2 * 1024 }
 };
-var ORDER = ["servers", "cats", "hero", "hist", "recent", "idx", "tmdb", "misc"];
+var ORDER = ["servers", "cats", "hero", "hist", "recent", "idx", "tmdb", "homeSnap", "misc"];
 var IDX = "_idx";
 var classOf = (key) => ORDER.find((c) => CLASSES[c].match(key));
 function utf8Len(s) {
@@ -1438,8 +1440,35 @@ function firstPickView({ servers, failed = false, device } = {}) {
   };
 }
 
+// src/homeFeed.js
+var BASE = "https://raw.githubusercontent.com/xuper-plugin/kino-plugin-supertv/main/home/";
+var MAX_AGE_MS = 3 * 24 * 60 * 60 * 1e3;
+function railsOf(rails) {
+  if (!Array.isArray(rails)) return null;
+  const r = rails.filter((x) => x && typeof x.id === "string" && typeof x.title === "string" && Array.isArray(x.items) && x.items.length);
+  return r.length ? r : null;
+}
+async function fetchHomeFeed(serverKey2) {
+  if (!serverKey2) return null;
+  try {
+    const r = await kino.fetch(`${BASE}${encodeURIComponent(serverKey2)}.json?v=${Math.floor(Date.now() / 36e5)}`, { headers: { Accept: "application/json" } });
+    if (!r.ok) return null;
+    const d = r.json();
+    if (!d || d.v !== 1 || d.serverKey !== serverKey2 || !d.tabs || typeof d.tabs !== "object") return null;
+    if (typeof d.at === "number" && Date.now() - d.at > MAX_AGE_MS) return null;
+    const tabs = {};
+    for (const k of Object.keys(d.tabs)) {
+      const t = railsOf(d.tabs[k]);
+      if (t) tabs[k] = t;
+    }
+    return Object.keys(tabs).length ? { tabs } : null;
+  } catch (_) {
+    return null;
+  }
+}
+
 // src/screen.js
-var PLUGIN_VERSION = "0.1.13";
+var PLUGIN_VERSION = "0.2.0";
 var TAB_KEY = "superTab";
 var HIST_KEY = "searchHist:v1";
 var HIST_MAX = 24;
@@ -1454,6 +1483,8 @@ var liveCatsAll = null;
 var found = null;
 var pickServers = null;
 var cacheKey = null;
+var homeFeedData = /* @__PURE__ */ new Map();
+var homeFeedTried = false;
 var SRVCHOSEN_KEY = "srvChosen:v1";
 var serverChosen = () => getStored(SRVCHOSEN_KEY) === "1";
 var markServerChosen = () => {
@@ -1467,6 +1498,8 @@ function resetCaches() {
   liveChans.clear();
   liveCatsAll = null;
   found = null;
+  homeFeedData.clear();
+  homeFeedTried = false;
 }
 function syncServer() {
   const key = serverKey();
@@ -1511,6 +1544,49 @@ function rememberFound(cards) {
 var channelCard = (i) => ({ id: i.id, ref: i.ref, title: i.title, kind: "live", poster: i.logo, ...i.adult ? { adult: true } : {} });
 var cardsOf = (items) => (Array.isArray(items) ? items : []).filter((i) => i && typeof i.id === "string" && typeof i.ref === "string").slice(0, CHANNELS_CAP).map(cardOf);
 var bump = (state) => ({ n: (state.n || 0) + 1 });
+var HOME_SNAP_PREFIX = "homeSnap:";
+var SNAP_V = 1;
+var SNAP_MAX = 9 * 1024;
+var slimCard = (c) => ({ id: c.id, ref: c.ref, title: c.title, ...c.kind ? { kind: c.kind } : {}, ...c.poster ? { poster: c.poster } : {} });
+var snapKey = (tab) => HOME_SNAP_PREFIX + "v" + SNAP_V + ":" + serverKey() + ":" + tab;
+function writeTabSnap(tab, rails) {
+  try {
+    if (!rails || !rails.length) return;
+    for (const maxRails of [rails.length, 10, 8, 6]) {
+      for (let per = 10; per >= 5; per -= 2) {
+        const slim2 = { v: SNAP_V, at: Date.now(), rails: rails.slice(0, maxRails).map((r) => ({ id: r.id, catId: r.catId, title: r.title, items: (r.items || []).slice(0, per).map(slimCard) })) };
+        const text2 = JSON.stringify(slim2);
+        if (text2.length <= SNAP_MAX) {
+          put(snapKey(tab), text2);
+          return;
+        }
+      }
+    }
+  } catch (_) {
+  }
+}
+function readSnap(tab) {
+  try {
+    const o = JSON.parse(kino.storage.get(snapKey(tab)) || "null");
+    return o && o.v === SNAP_V && Array.isArray(o.rails) && o.rails.length ? o : null;
+  } catch (_) {
+    return null;
+  }
+}
+async function loadHomeFeed() {
+  homeFeedTried = true;
+  let feed = null;
+  try {
+    feed = await fetchHomeFeed(serverKey());
+  } catch (_) {
+    feed = null;
+  }
+  if (!feed || !feed.tabs) return;
+  for (const tab of Object.keys(feed.tabs)) {
+    homeFeedData.set(tab, feed.tabs[tab]);
+    writeTabSnap(tab, feed.tabs[tab]);
+  }
+}
 function serverSheet(servers) {
   const cur = servers.current;
   const rows = (servers.items || []).slice(0, 60).map((s) => {
@@ -1562,9 +1638,13 @@ var tabOf = (state, route) => {
   return TAB_IDS.includes(state.tab) ? state.tab : TAB_IDS.includes(a.tab) ? a.tab : storedTab() || TAB_IDS[0];
 };
 function unitsFor(tab) {
-  return serverChosen() ? ["health", "cats", "tab:" + tab] : ["health", "pick"];
+  if (!serverChosen()) return ["health", "pick"];
+  if (homeFeedData.has(tab)) return ["hfeed", "health"];
+  if (!homeFeedTried) return ["hfeed", "health", "cats", "tab:" + tab];
+  return ["health", "cats", "tab:" + tab];
 }
 function isDone(unit) {
+  if (unit === "hfeed") return homeFeedTried;
   if (unit === "cats") return liveCatsAll !== null;
   if (unit === "health") return healthReady();
   if (unit === "pick") return pickServers !== null;
@@ -1576,6 +1656,10 @@ function pendingUnit(state, tab) {
   return unitsFor(tab).find((u) => !isDone(u) && !failed[u]) || null;
 }
 async function runUnit(unit) {
+  if (unit === "hfeed") {
+    await loadHomeFeed();
+    return;
+  }
   if (unit === "cats") {
     liveCatsAll = await liveCategories();
     return;
@@ -1593,10 +1677,16 @@ async function runUnit(unit) {
 }
 function mainView(ctx) {
   const state = ctx.state || {};
-  if (!healthReady() && !(state.failed && state.failed.health)) return verifyingView({ device: ctx.device });
-  if (!serverChosen()) return firstPickView({ servers: pickServers, failed: !!(state.failed && state.failed.pick), device: ctx.device });
+  if (!serverChosen()) {
+    if (!healthReady() && !(state.failed && state.failed.health)) return verifyingView({ device: ctx.device });
+    return firstPickView({ servers: pickServers, failed: !!(state.failed && state.failed.pick), device: ctx.device });
+  }
   const tab = tabOf(state, ctx.route);
-  const data = groupRails.get(tab) || null;
+  const feedRails = homeFeedData.get(tab);
+  const live = groupRails.get(tab) || null;
+  const snap = !feedRails && !live ? readSnap(tab) : null;
+  const data = feedRails ? { rails: feedRails, partial: false } : live || (snap ? { rails: snap.rails, partial: false, stale: true } : null);
+  if (!data && !healthReady() && !(state.failed && state.failed.health)) return verifyingView({ device: ctx.device });
   const failed = unitsFor(tab).some((u) => state.failed && state.failed[u]);
   return browseView({ tab, data, loading: pendingUnit(state, tab) !== null, failed: !data && failed, device: ctx.device });
 }

@@ -5,8 +5,9 @@ import * as cat from "./catalog.js";
 import { say, twin } from "./i18n.js";
 import { put } from "./store.js";
 import { TAB_IDS, browseView, searchView, liveView, settingsView, verifyingView, firstPickView, cardOf } from "./screenView.js";
+import { fetchHomeFeed } from "./homeFeed.js";
 
-const PLUGIN_VERSION = "0.1.13";
+const PLUGIN_VERSION = "0.2.0";
 const TAB_KEY = "superTab";
 const HIST_KEY = "searchHist:v1";
 const HIST_MAX = 24;
@@ -24,6 +25,8 @@ let liveCatsAll = null;       // [{ id, title, group, country?, genre?, adult? }
 let found = null;             // búsqueda de canales: { q, items, partial }
 let pickServers = null;       // lista para el selector de servidor de la primera vez (null = aún sin cargar)
 let cacheKey = null;
+const homeFeedData = new Map(); // tab -> [rails] del feed pre-armado (si se bajó): Home al instante, sin recorrer el IPTV
+let homeFeedTried = false;      // ya se intentó el feed (haya salido o no)
 
 // La persona ya eligió servidor al menos una vez: se recuerda para no volver a mostrar el selector inicial (se cambia con 🌐).
 const SRVCHOSEN_KEY = "srvChosen:v1";
@@ -35,6 +38,8 @@ function resetCaches() {
   liveChans.clear();
   liveCatsAll = null;
   found = null;
+  homeFeedData.clear();
+  homeFeedTried = false;
 }
 
 function syncServer() {
@@ -67,6 +72,45 @@ function rememberFound(cards) {
 const channelCard = (i) => ({ id: i.id, ref: i.ref, title: i.title, kind: "live", poster: i.logo, ...(i.adult ? { adult: true } : {}) });
 const cardsOf = (items) => (Array.isArray(items) ? items : []).filter((i) => i && typeof i.id === "string" && typeof i.ref === "string").slice(0, CHANNELS_CAP).map(cardOf);
 const bump = (state) => ({ n: (state.n || 0) + 1 });
+
+// ---- Feed pre-armado + snapshot en dispositivo ----
+const HOME_SNAP_PREFIX = "homeSnap:";
+const SNAP_V = 1;
+const SNAP_MAX = 9 * 1024; // por tab; varias pestañas caben en el presupuesto de la clase homeSnap (40 KB)
+const slimCard = (c) => ({ id: c.id, ref: c.ref, title: c.title, ...(c.kind ? { kind: c.kind } : {}), ...(c.poster ? { poster: c.poster } : {}) });
+const snapKey = (tab) => HOME_SNAP_PREFIX + "v" + SNAP_V + ":" + cat.serverKey() + ":" + tab;
+function writeTabSnap(tab, rails) {
+  try {
+    if (!rails || !rails.length) return;
+    // Se recorta hasta caber: menos ítems por fila y, si hace falta, menos filas. Tarjetas slim (lo que una fila necesita).
+    for (const maxRails of [rails.length, 10, 8, 6]) {
+      for (let per = 10; per >= 5; per -= 2) {
+        const slim = { v: SNAP_V, at: Date.now(), rails: rails.slice(0, maxRails).map((r) => ({ id: r.id, catId: r.catId, title: r.title, items: (r.items || []).slice(0, per).map(slimCard) })) };
+        const text = JSON.stringify(slim);
+        if (text.length <= SNAP_MAX) { put(snapKey(tab), text); return; }
+      }
+    }
+  } catch (_) { /* almacenamiento lleno: sin snapshot */ }
+}
+function readSnap(tab) {
+  try {
+    const o = JSON.parse(kino.storage.get(snapKey(tab)) || "null");
+    return o && o.v === SNAP_V && Array.isArray(o.rails) && o.rails.length ? o : null;
+  } catch (_) { return null; }
+}
+
+// Intenta el feed pre-armado del servidor (una sola descarga). Si llega, todas las pestañas quedan listas para pintar al
+// instante (sin tocar el IPTV) y se guarda un snapshot por tab; si no, se marca intentado y se cae a la carga en vivo. Nunca lanza.
+async function loadHomeFeed() {
+  homeFeedTried = true;
+  let feed = null;
+  try { feed = await fetchHomeFeed(cat.serverKey()); } catch (_) { feed = null; }
+  if (!feed || !feed.tabs) return;
+  for (const tab of Object.keys(feed.tabs)) {
+    homeFeedData.set(tab, feed.tabs[tab]);
+    writeTabSnap(tab, feed.tabs[tab]);
+  }
+}
 
 // El sheet del selector de servidor: un ✓ y resalte en el servidor activo.
 function serverSheet(servers) {
@@ -117,9 +161,17 @@ const tabOf = (state, route) => {
 
 // Unidades que faltan por cargar. Sin servidor elegido aún: solo salud y la lista para el selector inicial (no se carga el Home
 // hasta que la persona elija, para no entrar con un servidor al azar). Ya elegido: salud, categorías y las filas del tab.
-function unitsFor(tab) { return serverChosen() ? ["health", "cats", "tab:" + tab] : ["health", "pick"]; }
+// Primero el feed pre-armado (una sola descarga): si está, el Home sale al instante y NO se recorre el IPTV. Si el feed
+// tiene el tab, no hace falta nada más; si falta/está viejo/falló, se cae a la carga en vivo (categorías + filas del tab).
+function unitsFor(tab) {
+  if (!serverChosen()) return ["health", "pick"];
+  if (homeFeedData.has(tab)) return ["hfeed", "health"];
+  if (!homeFeedTried) return ["hfeed", "health", "cats", "tab:" + tab];
+  return ["health", "cats", "tab:" + tab];
+}
 
 function isDone(unit) {
+  if (unit === "hfeed") return homeFeedTried;
   if (unit === "cats") return liveCatsAll !== null;
   if (unit === "health") return cat.healthReady();
   if (unit === "pick") return pickServers !== null;
@@ -133,6 +185,7 @@ function pendingUnit(state, tab) {
 }
 
 async function runUnit(unit) {
+  if (unit === "hfeed") { await loadHomeFeed(); return; }
   if (unit === "cats") { liveCatsAll = await cat.liveCategories(); return; }
   if (unit === "health") { await cat.healthCheck(); return; }
   if (unit === "pick") { pickServers = await cat.serverList(); return; }
@@ -142,12 +195,19 @@ async function runUnit(unit) {
 
 function mainView(ctx) {
   const state = ctx.state || {};
-  // Antes del Home: si aún no se verificaron los servidores (y no falló el chequeo), muestra "Verificando servidores…".
-  if (!cat.healthReady() && !(state.failed && state.failed.health)) return verifyingView({ device: ctx.device });
-  // Primera vez: la persona elige servidor antes de entrar (no se toma uno al azar). Después se recuerda y se salta directo al Home.
-  if (!serverChosen()) return firstPickView({ servers: pickServers, failed: !!(state.failed && state.failed.pick), device: ctx.device });
+  // Primera vez (sin servidor elegido): la persona elige uno. Ese flujo sí necesita el chequeo para listar los que responden.
+  if (!serverChosen()) {
+    if (!cat.healthReady() && !(state.failed && state.failed.health)) return verifyingView({ device: ctx.device });
+    return firstPickView({ servers: pickServers, failed: !!(state.failed && state.failed.pick), device: ctx.device });
+  }
   const tab = tabOf(state, ctx.route);
-  const data = groupRails.get(tab) || null;
+  // Arranque rápido: feed pre-armado o snapshot de la última sesión → se pinta YA, sin esperar "Verificando servidores…".
+  // El chequeo sigue por detrás (unitsFor) y la verificación real del servidor ocurre antes de reproducir (resolve).
+  const feedRails = homeFeedData.get(tab);
+  const live = groupRails.get(tab) || null;
+  const snap = !feedRails && !live ? readSnap(tab) : null;
+  const data = feedRails ? { rails: feedRails, partial: false } : live || (snap ? { rails: snap.rails, partial: false, stale: true } : null);
+  if (!data && !cat.healthReady() && !(state.failed && state.failed.health)) return verifyingView({ device: ctx.device });
   const failed = unitsFor(tab).some((u) => state.failed && state.failed[u]);
   return browseView({ tab, data, loading: pendingUnit(state, tab) !== null, failed: !data && failed, device: ctx.device });
 }
