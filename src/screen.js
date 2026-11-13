@@ -7,7 +7,7 @@ import { put } from "./store.js";
 import { TAB_IDS, browseView, searchView, liveView, settingsView, verifyingView, firstPickView, cardOf } from "./screenView.js";
 import { fetchHomeFeed } from "./homeFeed.js";
 
-const PLUGIN_VERSION = "0.3.2";
+const PLUGIN_VERSION = "0.3.3";
 const TAB_KEY = "superTab";
 const HIST_KEY = "searchHist:v1";
 const HIST_MAX = 24;
@@ -23,8 +23,9 @@ const groupRails = new Map(); // grupo -> { rails: [{ id, catId, title, items }]
 const liveChans = new Map();  // categoría -> tarjetas de canal (drilldown)
 let liveCatsAll = null;       // [{ id, title, group, country?, genre?, adult? }]
 let found = null;             // búsqueda de canales: { q, items, partial }
-let pickServers = null;       // lista para el selector de servidor de la primera vez (null = aún sin cargar)
+let pickServers = null;       // lista para el selector de servidor (respaldo si el auto-elegido no responde)
 let cacheKey = null;
+let autoPickTried = false;    // primera instalación: ya se intentó elegir servidor automáticamente (sin que la persona elija)
 const homeFeedData = new Map(); // tab -> [rails] del feed pre-armado (si se bajó): Home al instante, sin recorrer el IPTV
 let homeFeedTried = false;      // ya se intentó el feed (haya salido o no)
 let eventsRow = null;           // fila DINÁMICA de eventos en vivo (la única en vivo del Home); null = aún sin cargar/vacía
@@ -123,6 +124,21 @@ function readSnap(tab) {
   } catch (_) { return null; }
 }
 
+// Primera instalación: elige el servidor automáticamente (el primero de la lista priorizada que responda) y lo recuerda, para
+// NO mostrar el selector ni obligar a elegir. selectServer prueba el servidor (y alterna dentro del mismo país), así el elegido
+// responde. Si ninguno responde (p. ej. sin internet), queda sin elegir y mainView muestra el selector como respaldo. El 🌐
+// del header sigue permitiendo cambiarlo cuando quiera.
+async function autoPick() {
+  autoPickTried = true;
+  try {
+    const list = await cat.serverList();
+    for (const it of (list.items || []).slice(0, 5)) {
+      const r = await cat.selectServer(String(it.i)).catch(() => ({ ok: false }));
+      if (r && r.ok) { markServerChosen(); cacheKey = cat.serverKey(); return; }
+    }
+  } catch (_) { /* sin internet: queda el selector de respaldo */ }
+}
+
 // Intenta el feed pre-armado del servidor (una sola descarga). Si llega, todas las pestañas quedan listas para pintar al
 // instante (sin tocar el IPTV) y se guarda un snapshot por tab; si no, se marca intentado y se cae a la carga en vivo. Nunca lanza.
 async function loadHomeFeed() {
@@ -210,7 +226,8 @@ const tabOf = (state, route) => {
 // Primero el feed pre-armado (una sola descarga): si está, el Home sale al instante y NO se recorre el IPTV. Si el feed
 // tiene el tab, no hace falta nada más; si falta/está viejo/falló, se cae a la carga en vivo (categorías + filas del tab).
 function unitsFor(tab) {
-  if (!serverChosen()) return ["health", "pick"];
+  // Primera instalación: se elige servidor automáticamente (autopick). Si no logró ninguno, se cae al selector manual.
+  if (!serverChosen()) return autoPickTried ? ["health", "pick"] : ["autopick"];
   let base;
   if (homeFeedData.has(tab)) base = ["hfeed", "health"];
   else if (!homeFeedTried) base = ["hfeed", "health", "cats", "tab:" + tab];
@@ -221,6 +238,7 @@ function unitsFor(tab) {
 }
 
 function isDone(unit) {
+  if (unit === "autopick") return autoPickTried;
   if (unit === "events") return eventsTried;
   if (unit === "hfeed") return homeFeedTried;
   if (unit === "cats") return liveCatsAll !== null;
@@ -236,6 +254,7 @@ function pendingUnit(state, tab) {
 }
 
 async function runUnit(unit) {
+  if (unit === "autopick") { await autoPick(); return; }
   if (unit === "events") { await loadEvents(); return; }
   if (unit === "hfeed") { await loadHomeFeed(); return; }
   if (unit === "cats") { liveCatsAll = await cat.liveCategories(); return; }
@@ -247,8 +266,10 @@ async function runUnit(unit) {
 
 function mainView(ctx) {
   const state = ctx.state || {};
-  // Primera vez (sin servidor elegido): la persona elige uno. Ese flujo sí necesita el chequeo para listar los que responden.
+  // Primera instalación: mientras se auto-elige el servidor, un breve "Verificando…". Si el autopick no encontró ninguno, se
+  // muestra el selector manual como respaldo (ahí sí la persona elige). El 🌐 del header permite cambiarlo en cualquier momento.
   if (!serverChosen()) {
+    if (!autoPickTried) return verifyingView({ device: ctx.device });
     if (!cat.healthReady() && !(state.failed && state.failed.health)) return verifyingView({ device: ctx.device });
     return firstPickView({ servers: pickServers, failed: !!(state.failed && state.failed.pick), device: ctx.device });
   }

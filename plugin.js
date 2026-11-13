@@ -1468,7 +1468,7 @@ async function fetchHomeFeed(serverKey2) {
 }
 
 // src/screen.js
-var PLUGIN_VERSION = "0.3.2";
+var PLUGIN_VERSION = "0.3.3";
 var TAB_KEY = "superTab";
 var HIST_KEY = "searchHist:v1";
 var HIST_MAX = 24;
@@ -1483,6 +1483,7 @@ var liveCatsAll = null;
 var found = null;
 var pickServers = null;
 var cacheKey = null;
+var autoPickTried = false;
 var homeFeedData = /* @__PURE__ */ new Map();
 var homeFeedTried = false;
 var eventsRow = null;
@@ -1614,6 +1615,21 @@ function readSnap(tab) {
     return null;
   }
 }
+async function autoPick() {
+  autoPickTried = true;
+  try {
+    const list = await serverList();
+    for (const it of (list.items || []).slice(0, 5)) {
+      const r = await selectServer(String(it.i)).catch(() => ({ ok: false }));
+      if (r && r.ok) {
+        markServerChosen();
+        cacheKey = serverKey();
+        return;
+      }
+    }
+  } catch (_) {
+  }
+}
 async function loadHomeFeed() {
   homeFeedTried = true;
   let feed = null;
@@ -1697,7 +1713,7 @@ var tabOf = (state, route) => {
   return TAB_IDS.includes(state.tab) ? state.tab : TAB_IDS.includes(a.tab) ? a.tab : storedTab() || TAB_IDS[0];
 };
 function unitsFor(tab) {
-  if (!serverChosen()) return ["health", "pick"];
+  if (!serverChosen()) return autoPickTried ? ["health", "pick"] : ["autopick"];
   let base;
   if (homeFeedData.has(tab)) base = ["hfeed", "health"];
   else if (!homeFeedTried) base = ["hfeed", "health", "cats", "tab:" + tab];
@@ -1706,6 +1722,7 @@ function unitsFor(tab) {
   return base;
 }
 function isDone(unit) {
+  if (unit === "autopick") return autoPickTried;
   if (unit === "events") return eventsTried;
   if (unit === "hfeed") return homeFeedTried;
   if (unit === "cats") return liveCatsAll !== null;
@@ -1719,6 +1736,10 @@ function pendingUnit(state, tab) {
   return unitsFor(tab).find((u) => !isDone(u) && !failed[u]) || null;
 }
 async function runUnit(unit) {
+  if (unit === "autopick") {
+    await autoPick();
+    return;
+  }
   if (unit === "events") {
     await loadEvents();
     return;
@@ -1745,6 +1766,7 @@ async function runUnit(unit) {
 function mainView(ctx) {
   const state = ctx.state || {};
   if (!serverChosen()) {
+    if (!autoPickTried) return verifyingView({ device: ctx.device });
     if (!healthReady() && !(state.failed && state.failed.health)) return verifyingView({ device: ctx.device });
     return firstPickView({ servers: pickServers, failed: !!(state.failed && state.failed.pick), device: ctx.device });
   }
