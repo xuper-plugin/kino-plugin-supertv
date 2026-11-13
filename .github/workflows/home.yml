@@ -38,4 +38,5 @@ jobs:
           git config user.name "xuper-plugin"
           git config user.email "335105665+xuper-plugin@users.noreply.github.com"
           git commit -m "Home pre-armado: actualiza home/<serverKey>.json"
+          git pull --rebase origin main
           git push origin HEAD:main
