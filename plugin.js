@@ -1468,7 +1468,7 @@ async function fetchHomeFeed(serverKey2) {
 }
 
 // src/screen.js
-var PLUGIN_VERSION = "0.2.0";
+var PLUGIN_VERSION = "0.3.0";
 var TAB_KEY = "superTab";
 var HIST_KEY = "searchHist:v1";
 var HIST_MAX = 24;
@@ -1485,6 +1485,8 @@ var pickServers = null;
 var cacheKey = null;
 var homeFeedData = /* @__PURE__ */ new Map();
 var homeFeedTried = false;
+var eventsRow = null;
+var eventsTried = false;
 var SRVCHOSEN_KEY = "srvChosen:v1";
 var serverChosen = () => getStored(SRVCHOSEN_KEY) === "1";
 var markServerChosen = () => {
@@ -1500,7 +1502,19 @@ function resetCaches() {
   found = null;
   homeFeedData.clear();
   homeFeedTried = false;
+  eventsRow = null;
+  eventsTried = false;
 }
+var cfg2 = (k, d) => {
+  try {
+    const v = kino.config.get(k);
+    return v === void 0 || v === null ? d : v;
+  } catch (_) {
+    return d;
+  }
+};
+var eventsGroup = () => String(cfg2("eventsGroup", "deportes"));
+var eventsOn = () => eventsGroup() !== "off";
 function syncServer() {
   const key = serverKey();
   if (cacheKey === null || cacheKey === "") {
@@ -1587,6 +1601,24 @@ async function loadHomeFeed() {
     writeTabSnap(tab, feed.tabs[tab]);
   }
 }
+function pickEventsCat(cats) {
+  const group = eventsGroup();
+  const inGrp = (cats || []).filter((c) => c.group === group && !c.adult);
+  return inGrp.find((c) => /event|agenda|hoy|vivo|directo|jornada|partidos?|cartelera/i.test(c.title || "")) || inGrp[0] || null;
+}
+async function loadEvents() {
+  eventsTried = true;
+  if (!eventsOn()) return;
+  try {
+    const cats = liveCatsAll || (liveCatsAll = await liveCategories());
+    const c = pickEventsCat(cats);
+    if (!c) return;
+    const page = await liveChannels({ categoryId: c.id });
+    const items = page.items.slice(0, RAIL_ITEMS).map(channelCard);
+    eventsRow = items.length ? { id: "lcat-" + c.id, catId: c.id, title: c.title, items } : null;
+  } catch (_) {
+  }
+}
 function serverSheet(servers) {
   const cur = servers.current;
   const rows = (servers.items || []).slice(0, 60).map((s) => {
@@ -1639,11 +1671,15 @@ var tabOf = (state, route) => {
 };
 function unitsFor(tab) {
   if (!serverChosen()) return ["health", "pick"];
-  if (homeFeedData.has(tab)) return ["hfeed", "health"];
-  if (!homeFeedTried) return ["hfeed", "health", "cats", "tab:" + tab];
-  return ["health", "cats", "tab:" + tab];
+  let base;
+  if (homeFeedData.has(tab)) base = ["hfeed", "health"];
+  else if (!homeFeedTried) base = ["hfeed", "health", "cats", "tab:" + tab];
+  else base = ["health", "cats", "tab:" + tab];
+  if (tab === TAB_IDS[0] && eventsOn() && !eventsTried) base = [...base, "events"];
+  return base;
 }
 function isDone(unit) {
+  if (unit === "events") return eventsTried;
   if (unit === "hfeed") return homeFeedTried;
   if (unit === "cats") return liveCatsAll !== null;
   if (unit === "health") return healthReady();
@@ -1656,6 +1692,10 @@ function pendingUnit(state, tab) {
   return unitsFor(tab).find((u) => !isDone(u) && !failed[u]) || null;
 }
 async function runUnit(unit) {
+  if (unit === "events") {
+    await loadEvents();
+    return;
+  }
   if (unit === "hfeed") {
     await loadHomeFeed();
     return;
@@ -1685,7 +1725,11 @@ function mainView(ctx) {
   const feedRails = homeFeedData.get(tab);
   const live = groupRails.get(tab) || null;
   const snap = !feedRails && !live ? readSnap(tab) : null;
-  const data = feedRails ? { rails: feedRails, partial: false } : live || (snap ? { rails: snap.rails, partial: false, stale: true } : null);
+  let data = feedRails ? { rails: feedRails, partial: false } : live || (snap ? { rails: snap.rails, partial: false, stale: true } : null);
+  if (tab === TAB_IDS[0] && eventsRow) {
+    const rest = (data && data.rails || []).filter((r) => r.id !== eventsRow.id);
+    data = { ...data || { partial: false }, rails: [eventsRow, ...rest] };
+  }
   if (!data && !healthReady() && !(state.failed && state.failed.health)) return verifyingView({ device: ctx.device });
   const failed = unitsFor(tab).some((u) => state.failed && state.failed[u]);
   return browseView({ tab, data, loading: pendingUnit(state, tab) !== null, failed: !data && failed, device: ctx.device });
@@ -1724,6 +1768,7 @@ async function screen(ctx) {
 var events = {
   open({ route, state }) {
     if (route && route.name && route.name !== "main") return null;
+    eventsTried = false;
     return { state: { tab: tabOf(state, route), ...bump(state), failed: null } };
   },
   tab({ value, arg, state }) {

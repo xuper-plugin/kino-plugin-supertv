@@ -7,7 +7,7 @@ import { put } from "./store.js";
 import { TAB_IDS, browseView, searchView, liveView, settingsView, verifyingView, firstPickView, cardOf } from "./screenView.js";
 import { fetchHomeFeed } from "./homeFeed.js";
 
-const PLUGIN_VERSION = "0.2.0";
+const PLUGIN_VERSION = "0.3.0";
 const TAB_KEY = "superTab";
 const HIST_KEY = "searchHist:v1";
 const HIST_MAX = 24;
@@ -27,6 +27,8 @@ let pickServers = null;       // lista para el selector de servidor de la primer
 let cacheKey = null;
 const homeFeedData = new Map(); // tab -> [rails] del feed pre-armado (si se bajó): Home al instante, sin recorrer el IPTV
 let homeFeedTried = false;      // ya se intentó el feed (haya salido o no)
+let eventsRow = null;           // fila DINÁMICA de eventos en vivo (la única en vivo del Home); null = aún sin cargar/vacía
+let eventsTried = false;        // ya se intentó cargar los eventos en esta entrada (se reintenta en cada `open`)
 
 // La persona ya eligió servidor al menos una vez: se recuerda para no volver a mostrar el selector inicial (se cambia con 🌐).
 const SRVCHOSEN_KEY = "srvChosen:v1";
@@ -40,7 +42,14 @@ function resetCaches() {
   found = null;
   homeFeedData.clear();
   homeFeedTried = false;
+  eventsRow = null;
+  eventsTried = false;
 }
+
+// Config de la fila de eventos en vivo: grupo cuyo "en vivo ahora" se muestra arriba del Home. "off" la oculta. Por defecto deportes.
+const cfg = (k, d) => { try { const v = kino.config.get(k); return v === undefined || v === null ? d : v; } catch (_) { return d; } };
+const eventsGroup = () => String(cfg("eventsGroup", "deportes"));
+const eventsOn = () => eventsGroup() !== "off";
 
 function syncServer() {
   const key = cat.serverKey();
@@ -112,6 +121,28 @@ async function loadHomeFeed() {
   }
 }
 
+// Elige la categoría de "eventos en vivo" del grupo configurado: prefiere la de agenda/eventos/hoy/vivo, si no la primera.
+function pickEventsCat(cats) {
+  const group = eventsGroup();
+  const inGrp = (cats || []).filter((c) => c.group === group && !c.adult);
+  return inGrp.find((c) => /event|agenda|hoy|vivo|directo|jornada|partidos?|cartelera/i.test(c.title || "")) || inGrp[0] || null;
+}
+
+// Fila DINÁMICA de eventos en vivo: se carga SIEMPRE en vivo (nunca del feed ni del snapshot: son eventos del momento). Baja la
+// última prioridad del `tick`, así NO bloquea el Home (que ya se pintó del feed). Nunca lanza; si no hay, simplemente no sale.
+async function loadEvents() {
+  eventsTried = true;
+  if (!eventsOn()) return;
+  try {
+    const cats = liveCatsAll || (liveCatsAll = await cat.liveCategories());
+    const c = pickEventsCat(cats);
+    if (!c) return;
+    const page = await cat.liveChannels({ categoryId: c.id });
+    const items = page.items.slice(0, RAIL_ITEMS).map(channelCard);
+    eventsRow = items.length ? { id: "lcat-" + c.id, catId: c.id, title: c.title, items } : null;
+  } catch (_) { /* se queda sin fila de eventos; el resto del Home ya está */ }
+}
+
 // El sheet del selector de servidor: un ✓ y resalte en el servidor activo.
 function serverSheet(servers) {
   const cur = servers.current;
@@ -165,12 +196,17 @@ const tabOf = (state, route) => {
 // tiene el tab, no hace falta nada más; si falta/está viejo/falló, se cae a la carga en vivo (categorías + filas del tab).
 function unitsFor(tab) {
   if (!serverChosen()) return ["health", "pick"];
-  if (homeFeedData.has(tab)) return ["hfeed", "health"];
-  if (!homeFeedTried) return ["hfeed", "health", "cats", "tab:" + tab];
-  return ["health", "cats", "tab:" + tab];
+  let base;
+  if (homeFeedData.has(tab)) base = ["hfeed", "health"];
+  else if (!homeFeedTried) base = ["hfeed", "health", "cats", "tab:" + tab];
+  else base = ["health", "cats", "tab:" + tab];
+  // La fila de eventos en vivo va AL FINAL (última prioridad) y solo en el Home (tab "all"): se carga "cuando pueda", sin bloquear.
+  if (tab === TAB_IDS[0] && eventsOn() && !eventsTried) base = [...base, "events"];
+  return base;
 }
 
 function isDone(unit) {
+  if (unit === "events") return eventsTried;
   if (unit === "hfeed") return homeFeedTried;
   if (unit === "cats") return liveCatsAll !== null;
   if (unit === "health") return cat.healthReady();
@@ -185,6 +221,7 @@ function pendingUnit(state, tab) {
 }
 
 async function runUnit(unit) {
+  if (unit === "events") { await loadEvents(); return; }
   if (unit === "hfeed") { await loadHomeFeed(); return; }
   if (unit === "cats") { liveCatsAll = await cat.liveCategories(); return; }
   if (unit === "health") { await cat.healthCheck(); return; }
@@ -206,7 +243,12 @@ function mainView(ctx) {
   const feedRails = homeFeedData.get(tab);
   const live = groupRails.get(tab) || null;
   const snap = !feedRails && !live ? readSnap(tab) : null;
-  const data = feedRails ? { rails: feedRails, partial: false } : live || (snap ? { rails: snap.rails, partial: false, stale: true } : null);
+  let data = feedRails ? { rails: feedRails, partial: false } : live || (snap ? { rails: snap.rails, partial: false, stale: true } : null);
+  // Fila de eventos en vivo arriba del Home (solo tab "all"): se antepone cuando ya cargó, sin duplicar si esa categoría ya está.
+  if (tab === TAB_IDS[0] && eventsRow) {
+    const rest = ((data && data.rails) || []).filter((r) => r.id !== eventsRow.id);
+    data = { ...(data || { partial: false }), rails: [eventsRow, ...rest] };
+  }
   if (!data && !cat.healthReady() && !(state.failed && state.failed.health)) return verifyingView({ device: ctx.device });
   const failed = unitsFor(tab).some((u) => state.failed && state.failed[u]);
   return browseView({ tab, data, loading: pendingUnit(state, tab) !== null, failed: !data && failed, device: ctx.device });
@@ -243,6 +285,7 @@ export async function screen(ctx) {
 const events = {
   open({ route, state }) {
     if (route && route.name && route.name !== "main") return null;
+    eventsTried = false; // cada entrada al Home vuelve a traer los eventos en vivo (frescos); se mantiene la fila previa hasta que lleguen
     return { state: { tab: tabOf(state, route), ...bump(state), failed: null } };
   },
   tab({ value, arg, state }) {

@@ -1,7 +1,7 @@
 {
   "id": "super-tv",
   "name": "SuperTV",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "apiVersion": 13,
   "entry": "plugin.js",
   "description": "Canales de TV en vivo.",
@@ -273,6 +273,47 @@
       "hintEn": "If a channel will not play, try the other",
       "label": "Formato del en vivo",
       "labelEn": "Live format"
+    },
+    {
+      "key": "eventsGroup",
+      "type": "select",
+      "default": "deportes",
+      "options": [
+        {
+          "value": "deportes",
+          "label": "Deportes",
+          "labelEn": "Sports"
+        },
+        {
+          "value": "premium",
+          "label": "Premium",
+          "labelEn": "Premium"
+        },
+        {
+          "value": "paises",
+          "label": "Países",
+          "labelEn": "Countries"
+        },
+        {
+          "value": "tematicos",
+          "label": "Temáticos",
+          "labelEn": "Themed"
+        },
+        {
+          "value": "radio",
+          "label": "Radio",
+          "labelEn": "Radio"
+        },
+        {
+          "value": "off",
+          "label": "No mostrar",
+          "labelEn": "Hide"
+        }
+      ],
+      "hint": "Fila superior con lo que está en vivo ahora de ese grupo",
+      "hintEn": "Top row with what is live now from that group",
+      "label": "Eventos en vivo arriba",
+      "labelEn": "Live events on top"
     }
   ],
   "enhancements": {
@@ -368,6 +409,47 @@
           "hintEn": "If a channel will not play, try the other",
           "label": "Formato del en vivo",
           "labelEn": "Live format"
+        },
+        {
+          "key": "eventsGroup",
+          "type": "select",
+          "default": "deportes",
+          "options": [
+            {
+              "value": "deportes",
+              "label": "Deportes",
+              "labelEn": "Sports"
+            },
+            {
+              "value": "premium",
+              "label": "Premium",
+              "labelEn": "Premium"
+            },
+            {
+              "value": "paises",
+              "label": "Países",
+              "labelEn": "Countries"
+            },
+            {
+              "value": "tematicos",
+              "label": "Temáticos",
+              "labelEn": "Themed"
+            },
+            {
+              "value": "radio",
+              "label": "Radio",
+              "labelEn": "Radio"
+            },
+            {
+              "value": "off",
+              "label": "No mostrar",
+              "labelEn": "Hide"
+            }
+          ],
+          "hint": "Fila superior con lo que está en vivo ahora de ese grupo",
+          "hintEn": "Top row with what is live now from that group",
+          "label": "Eventos en vivo arriba",
+          "labelEn": "Live events on top"
         }
       ]
     },
@@ -379,6 +461,6 @@
   },
   "signature": {
     "authorKey": "6693946bd5c56196960959c4b9665fad5094374bcb85ddb282f8bf762c835263",
-    "value": "c0469e3145db08dda32fe2628279554b4b01ba8307d1ed0a0c7b960ea6dabf5b55663e5213f3a32e3bc5c538e7beb8c547fb06445b99ad8baf5ae5a71075640f"
+    "value": "f15cd2cba4468c7354e4a9c50b2f2b20d767626bcff2c9034e77d609ad2119769472b0aa3fa60729e9fff258921ed0c7a79a01cc5975c848aca22b83e4b92b07"
   }
 }
