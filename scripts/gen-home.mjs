@@ -8,6 +8,20 @@ import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { randomBytes, createCipheriv } from "node:crypto";
+
+// Clave AES-256 (hex) para sellar el feed como Xuper: el plugin la abre con kino.secret("feedKey"); un fork no puede.
+// En el Action viene del secret FEED_KEY; si falta, se aborta (NO se publica nada en claro).
+const FEED_KEY = (process.env.FEED_KEY || "").trim();
+if (!/^[0-9a-fA-F]{64}$/.test(FEED_KEY)) { console.error("Falta FEED_KEY (64 hex). No se genera nada en claro."); process.exit(2); }
+const KEY = Buffer.from(FEED_KEY, "hex");
+// Sella un objeto -> sobre { v:1, iv:b64(12B), data:b64(ciphertext+tag16) } (mismo formato que seedBox.js).
+function seal(obj) {
+  const iv = randomBytes(12);
+  const c = createCipheriv("aes-256-gcm", KEY, iv);
+  const ct = Buffer.concat([c.update(JSON.stringify(obj), "utf8"), c.final()]);
+  return JSON.stringify({ v: 1, iv: iv.toString("base64"), data: Buffer.concat([ct, c.getAuthTag()]).toString("base64") });
+}
 
 // Al re-crear el kino por servidor, un timer pendiente del servidor anterior (rate-limit) puede rechazar tarde: inofensivo.
 process.on("unhandledRejection", () => {});
@@ -86,12 +100,12 @@ for (let i = 0; i < total; i++) {
     builtKeys.add(key);
     const home = await buildServer();
     if (!home) { console.log(`#${i + 1} ${key} (${ms(t0)} ms): sin canales`); empty++; continue; }
-    writeFileSync(join(OUT_DIR, key + ".json"), JSON.stringify(home));
-    const bytes = JSON.stringify(home).length;
+    const enc = seal(home);
+    writeFileSync(join(OUT_DIR, key + ".enc.json"), enc);
     const nTabs = Object.keys(home.tabs).length;
     const nRails = Object.values(home.tabs).reduce((n, r) => n + r.length, 0);
-    index.push({ serverKey: key, at: home.at, tabs: nTabs, rails: nRails, bytes });
-    console.log(`#${i + 1} ${key} (${ms(t0)} ms): ${nTabs} tabs, ${nRails} filas, ${Math.round(bytes / 1024)} KB -> ${key}.json`);
+    index.push({ serverKey: key, at: home.at, tabs: nTabs, rails: nRails, bytes: enc.length });
+    console.log(`#${i + 1} ${key} (${ms(t0)} ms): ${nTabs} tabs, ${nRails} filas, ${Math.round(enc.length / 1024)} KB -> ${key}.enc.json`);
     ok++;
   } catch (e) { console.log(`#${i + 1} (${ms(t0)} ms): error ${e && e.message}`); fail++; }
 }

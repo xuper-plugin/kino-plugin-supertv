@@ -1445,6 +1445,15 @@ function firstPickView({ servers, failed = false, device } = {}) {
 // src/homeFeed.js
 var BASE = "https://raw.githubusercontent.com/xuper-plugin/kino-plugin-supertv/main/home/";
 var MAX_AGE_MS = 3 * 24 * 60 * 60 * 1e3;
+function openBox(box) {
+  if (!box || typeof box !== "object" || box.v !== 1 || typeof box.iv !== "string" || typeof box.data !== "string") return null;
+  try {
+    const text2 = kino.crypto.decrypt("aes-256-gcm", { key: kino.secret("feedKey"), iv: box.iv, ivEncoding: "base64", data: box.data });
+    return JSON.parse(text2);
+  } catch (_) {
+    return null;
+  }
+}
 function railsOf(rails) {
   if (!Array.isArray(rails)) return null;
   const r = rails.filter((x) => x && typeof x.id === "string" && typeof x.title === "string" && Array.isArray(x.items) && x.items.length);
@@ -1453,9 +1462,9 @@ function railsOf(rails) {
 async function fetchHomeFeed(serverKey2) {
   if (!serverKey2) return null;
   try {
-    const r = await kino.fetch(`${BASE}${encodeURIComponent(serverKey2)}.json?v=${Math.floor(Date.now() / 36e5)}`, { headers: { Accept: "application/json" } });
+    const r = await kino.fetch(`${BASE}${encodeURIComponent(serverKey2)}.enc.json?v=${Math.floor(Date.now() / 36e5)}`, { headers: { Accept: "application/json" } });
     if (!r.ok) return null;
-    const d = r.json();
+    const d = openBox(JSON.parse(r.text()));
     if (!d || d.v !== 1 || d.serverKey !== serverKey2 || !d.tabs || typeof d.tabs !== "object") return null;
     if (typeof d.at === "number" && Date.now() - d.at > MAX_AGE_MS) return null;
     const tabs = {};
@@ -1470,7 +1479,7 @@ async function fetchHomeFeed(serverKey2) {
 }
 
 // src/screen.js
-var PLUGIN_VERSION = "0.3.4";
+var PLUGIN_VERSION = "0.4.0";
 var TAB_KEY = "superTab";
 var HIST_KEY = "searchHist:v1";
 var HIST_MAX = 24;

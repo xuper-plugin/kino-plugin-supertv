@@ -1,7 +1,7 @@
 {
   "id": "super-tv",
   "name": "SuperTV",
-  "version": "0.3.4",
+  "version": "0.4.0",
   "apiVersion": 13,
   "entry": "plugin.js",
   "description": "Canales de TV en vivo.",
@@ -179,6 +179,13 @@
   ],
   "fetchHosts": "any",
   "streamHosts": "any",
+  "secrets": {
+    "feedKey": {
+      "seal": "kino-sealed:v1:V-TwWC3i6r1Y-cGzWgLUyY0Yt9WlZO6vOHO-GZVP3QlBEG2qY6Yt8a81mJ9nALR20hljgffZjWc73L5NFox3lWQLcgfWagtfJAUr_QvEot3ODyoLpvTqgMbRt02R3pcVIlZTxFMq9gl2vngYDO6zNCvFlBMW0BTcKQ-hLA",
+      "use": "cipher-key",
+      "encoding": "hex"
+    }
+  },
   "capabilities": [
     "home",
     "search",
@@ -461,6 +468,6 @@
   },
   "signature": {
     "authorKey": "6693946bd5c56196960959c4b9665fad5094374bcb85ddb282f8bf762c835263",
-    "value": "b89d988c9448609f031bda10cb0ce6e6be3d26c7d39670130552ff314782f8c65e845e79ad3ab080ddd4c8ed1b8d3c361f35359895227362a19b8e76dcb3840a"
+    "value": "20e31953ee368394551e973ee162f5c9a086d75b23bb1af6fc7658f32d91dc865dbf5efecdd562a5e65b9a004ce326daae07eab49a7a8a080b929004a060170f"
   }
 }

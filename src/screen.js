@@ -7,7 +7,7 @@ import { put } from "./store.js";
 import { TAB_IDS, browseView, searchView, liveView, settingsView, verifyingView, firstPickView, cardOf } from "./screenView.js";
 import { fetchHomeFeed } from "./homeFeed.js";
 
-const PLUGIN_VERSION = "0.3.4";
+const PLUGIN_VERSION = "0.4.0";
 const TAB_KEY = "superTab";
 const HIST_KEY = "searchHist:v1";
 const HIST_MAX = 24;
