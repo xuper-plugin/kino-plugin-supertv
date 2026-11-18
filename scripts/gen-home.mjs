@@ -55,9 +55,11 @@ const TABS = ["all", "premium", "paises", "deportes", "radio"]; // = TAB_IDS del
 const RAILS_PER_TAB = 12, RAIL_ITEMS = 20;
 const SCHEMA = 1;
 // The v2 copy carries what one screen can draw. A rail of round channels is 6 + 3 per card of Kino's 600 screen nodes, so
-// v1's 12 rails x 20 cards is always cut by Kino (a real feed's "all" tab: 806 nodes); 8 x 10 is 302 with the bar, 368
-// with a full events row on top (browseView counted, 2026-11-17). v1 keeps 12 x 20 for the installed versions.
-const HOME_V2_RAILS = 8, HOME_V2_ITEMS = 10;
+// v1's 12 rails x 20 cards is always cut by Kino (a real feed's "all" tab: 806 nodes). The cap is on cards, not rails:
+// 12 x 10 is 446 with the bar, 512 with a full events row on top (browseView counted, 2026-11-17), so every category of a
+// tab stays on screen (the screen shuffles its rails on each visit; capping rails would hide the same ones every time) and
+// each rail's "Ver todos" opens the rest. v1 keeps 12 x 20 for the installed versions.
+const HOME_V2_RAILS = 12, HOME_V2_ITEMS = 10;
 const v2Of = (_path, obj) => ({
   ...obj,
   tabs: Object.fromEntries(Object.entries(obj.tabs || {}).map(([tab, rails]) => [tab, feedSet.capRails(rails, HOME_V2_RAILS, HOME_V2_ITEMS)])),
