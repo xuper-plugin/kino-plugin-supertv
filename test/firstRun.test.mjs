@@ -204,11 +204,13 @@ test("never two accounts of one host at once; a host that timed out is not asked
   assert.deepEqual(probes(w, n).map((e) => e.n).sort(), ["g", "p1", "p2"]);
   assert.ok(t2.took <= 16000, `the rescue keeps to one tick (${t2.took} ms)`);
   assert.equal(srvs(w).chosen, undefined);
-  assert.ok(!(await d.view()).includes('"fpPage"'), "the picker's list is still loading");
-  await d.tick(); // the picker's list
+  // The picker shows right after the rescue, its rows from the list in hand: no third tick behind Kino's doubled wait.
+  assert.equal(w.log.length - n, t2.requests);
   const pick = await d.view();
-  assert.ok(pick.includes('"fpPage"'), "the manual picker, only now");
+  assert.ok(pick.includes('"fpPage"'), "the manual picker, only now, in the rescue's tick");
   assert.ok(!pick.includes("d.example"), "never the dead one");
+  const t3 = await d.tick();
+  assert.equal(t3.requests, 0, "nothing left to load");
   assert.equal(srvs(w).chosen, undefined, "nothing chosen for the person");
   assert.equal(w.store.get("srvChosen:v1"), undefined);
 });
@@ -243,6 +245,42 @@ test("every raced account fails (dead, or slower than 4 s): the rescue picks the
   const n = w.log.length;
   await d.tick();
   assert.equal(probes(w, n).length, 0);
+});
+
+test("the race keeps to its 9 s: a late account gets only the time left, none starts with under 1.5 s left, the tick ends with the deadline", async () => {
+  // Ranked as listed (all Spanish, one host each). Lane by lane: h1 and h2 hang to 4 s; d1-d4 die at 1.2 s each in the third
+  // lane; at 4 s d5 and h3 start (4 s each), at 4.8 s h4, at 5.2 s h5 with 3.8 s left; at 8 s only 1 s is left: nothing starts.
+  const accounts = { h1: { url: "https://h1.example", flag: "🇪🇸", b: "hang" }, h2: { url: "https://h2.example", flag: "🇪🇸", b: "hang" } };
+  for (let i = 1; i <= 5; i++) accounts["d" + i] = { url: `https://d${i}.example`, flag: "🇪🇸", b: { dead: 1200 } };
+  for (let i = 3; i <= 9; i++) accounts["h" + i] = { url: `https://h${i}.example`, flag: "🇪🇸", b: "hang" };
+  accounts.slow = { url: "https://slow.example", flag: "🇪🇸", b: 2000 };
+  const w = world({ accounts });
+  const d = await driver(w);
+  const t1 = await d.tick();
+  const race = probes(w);
+  const raceStart = race[0].at;
+  assert.deepEqual(race.map((e) => e.n), ["h1", "h2", "d1", "d2", "d3", "d4", "d5", "h3", "h4", "h5"]);
+  assert.equal(race.find((e) => e.n === "h5").timeoutMs, 3800, "the last account started gets only the time left");
+  assert.ok(race.every((e) => e.at - raceStart <= 9000 - 1500), "none starts with less than 1.5 s left");
+  assert.ok(race.every((e) => e.end - raceStart <= 9000), String(race.map((e) => e.n + "@" + (e.end - raceStart))));
+  assert.equal(t1.took, BOOT_MS + 9000, "Kino holds the call to the race's deadline, never past it");
+  assert.equal(srvs(w).chosen, undefined);
+  // The rescue: six hang to 10 s, then the next ones get the 3 s left; the slow account answers and is chosen.
+  const t2 = await d.tick();
+  assert.equal(srvs(w).chosen, keyOfAcc(w, "slow"));
+  assert.ok(t2.took <= 16000, `the rescue tick took ${t2.took} ms`);
+  assert.ok(w.log.slice(t2.from).some((e) => e.n === "feed"), "the feed in the rescue's tick");
+});
+
+test("no account answers at all: the picker shows right after the rescue, with no further doubled wait", async () => {
+  const accounts = {};
+  for (let i = 1; i <= 12; i++) accounts["h" + i] = { url: `https://h${i}.example`, flag: "🇪🇸", b: "hang" };
+  const w = world({ accounts });
+  const d = await driver(w);
+  const out = await d.run();
+  assert.equal(out.kind, "picker");
+  assert.equal(out.ticks, 2, "the race, then the rescue, which also reads the picker's rows");
+  assert.ok(out.at <= 45000, `the picker at ${out.at} ms (with a third tick for its rows: 66 s; the fixed race of three: 58.5 s)`);
 });
 
 test("no feed for the account: the Home loads live first, and the health check only after it", async () => {

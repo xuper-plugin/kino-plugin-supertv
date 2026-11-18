@@ -169,12 +169,13 @@ async function autoPick() {
 // The race found no account (every one it reached failed, or the slow ones needed more than 4 s): the health check (10 s per
 // account, all of them) and its automatic pick of the best-ranked account that answered run in ONE tick, the feed after it
 // when time is left, so Kino's doubled wait after a slow tick is paid once. Only when no account answered does the manual
-// picker show.
+// picker show, its rows read in this same tick from the list in hand (no request), so no second doubled wait comes before it.
 async function rescue() {
   rescueTried = true;
   const until = Date.now() + FIRST_RUN_TICK_MS;
   try { await cat.healthCheck({ until: until - FEED_MIN_MS, pick: true }); } catch (_) { /* nothing chosen: the picker */ }
-  if (cat.hasChosenServer()) await picked(true, until);
+  if (cat.hasChosenServer()) { await picked(true, until); return; }
+  try { pickServers = cat.cachedServerList(); } catch (_) { pickServers = null; } // no list stored: the "pick" unit fetches it
 }
 
 // A server was chosen for the person ([now]: in this runtime): remembered, then its feed while the tick has time for it.

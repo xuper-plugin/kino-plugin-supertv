@@ -2058,6 +2058,12 @@ async function serverList() {
   const { items, checked } = listItems(st);
   return { current: st.idx, items, checked };
 }
+function cachedServerList() {
+  const st = migrate(readSrvs());
+  if (!st || !Array.isArray(st.list) || !st.list.length) return null;
+  const { items, checked } = listItems(st);
+  return { current: st.idx, items, checked };
+}
 function listItems(st) {
   const h = healthFresh();
   const online = h ? new Set(h.online) : null;
@@ -3219,7 +3225,15 @@ async function rescue() {
     await healthCheck({ until: until - FEED_MIN_MS, pick: true });
   } catch (_) {
   }
-  if (hasChosenServer()) await picked(true, until);
+  if (hasChosenServer()) {
+    await picked(true, until);
+    return;
+  }
+  try {
+    pickServers = cachedServerList();
+  } catch (_) {
+    pickServers = null;
+  }
 }
 async function picked(now, until) {
   markServerChosen();

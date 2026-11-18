@@ -409,6 +409,15 @@ export async function serverList() {
   return { current: st.idx, items, checked };
 }
 
+// serverList from the stored server list, with no request (the first run's rescue: the picker shows in that same tick, not
+// after Kino's doubled wait); null when no list is stored.
+export function cachedServerList() {
+  const st = migrate(readSrvs());
+  if (!st || !Array.isArray(st.list) || !st.list.length) return null;
+  const { items, checked } = listItems(st);
+  return { current: st.idx, items, checked };
+}
+
 // The picker's rows for [st] (no request): usable accounts only, online ones only after a fresh health check, Spanish first.
 function listItems(st) {
   const h = healthFresh();
