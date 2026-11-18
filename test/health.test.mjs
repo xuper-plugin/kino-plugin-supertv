@@ -13,19 +13,23 @@ test.afterEach(() => { Date.now = realNow; });
 const H = 3600000;
 const cats = Array.from({ length: 12 }, (_, i) => ({ category_id: String(100 + i), category_name: "CAT " + i }));
 
-// 30 accounts, one host each; every third one hangs. [panelsAt]: when the stored panel map was written (null: none).
-function world({ panelsAt = null, n = 30 } = {}) {
+// 30 accounts, one host each; every third one hangs ([hangAll]: every one). [panelsAt]: when the stored panel map was written
+// (null: none), with [members] (keys) confirmed then. [healthAt]: a stored health result of that time, every account online.
+function world({ panelsAt = null, n = 30, healthAt = null, hangAll = false, members = [] } = {}) {
   const start = Date.UTC(2026, 10, 18, 12);
   const net = virtualNet({ start });
   Date.now = net.now;
   const list = Array.from({ length: n }, (_, i) => ({ url: `http://h${i}.example`, username: "u" + i, password: "p" + i, name: "🇪🇸" }));
-  const hang = (u) => Number(u.hostname.slice(1).split(".")[0]) % 3 === 0;
+  const hang = (u) => hangAll || Number(u.hostname.slice(1).split(".")[0]) % 3 === 0;
   const log = [];
   const pending = new Set();
+  const g = Object.fromEntries(members.map((m) => [m, "P1"]));
+  const t = Object.fromEntries(members.map((m) => [m, panelsAt]));
   const k = installKino({ storage: {
     srvs: JSON.stringify({ ts: start, list, idx: 1, ok: true, okAt: start, chosen: keyOf(list[1]), mig: 1, v: 2 }),
     "srvChosen:v1": "1",
-    ...(panelsAt !== null ? { "panels:v1": JSON.stringify({ v: 1, at: panelsAt, g: {}, t: {} }) } : {}),
+    ...(panelsAt !== null ? { "panels:v1": JSON.stringify({ v: 1, at: panelsAt, g, t }) } : {}),
+    ...(healthAt !== null ? { "health:v1": JSON.stringify({ ts: healthAt, online: list.map((s) => s.url) }) } : {}),
   }, routes: [(url, init) => {
     const u = new URL(url);
     const action = param(url, "action");
@@ -113,4 +117,49 @@ test("no server list at all (bootstrap down, none stored): the step ends the che
   assert.ok(n >= 1 && n <= 2, String(n));
   await cat.healthStep();
   assert.equal(k.requests.length, n * 2, "a direct call still tries");
+});
+
+// The screen's ticks until the check is ready (Kino holds each one until its requests settle).
+async function untilReady(w, cat) {
+  const ticks = [];
+  for (let i = 0; i < 20 && !cat.healthReady(); i++) {
+    const t0 = w.net.now();
+    const from = w.log.length;
+    await w.net.run(cat.healthStep());
+    await w.drain();
+    ticks.push({ took: w.net.now() - t0, requests: w.log.length - from });
+  }
+  return ticks;
+}
+
+test("a panel map 18 h old with a health result still fresh: the full round runs anyway, before the 24 h confirmations lapse", async () => {
+  // Checked 1 h ago (a liveness round: fresh for 5 more hours) while the map was 18 h old; it is 19 h old now. Waiting for the
+  // health result to age would put the full round at 24 h at best, when the failover's same-panel step has no member left.
+  const w = world({ panelsAt: Date.UTC(2026, 10, 17, 17), healthAt: Date.UTC(2026, 10, 18, 11) });
+  const cat = await fresh("catalog.js");
+  assert.ok(!cat.healthReady(), "the full round is due");
+  const ticks = await untilReady(w, cat);
+  assert.equal(ticks.length, 5);
+  assert.ok(w.log.every((e) => e.action === "get_live_categories"));
+  const map = JSON.parse(w.store.get("panels:v1"));
+  assert.equal(map.at, w.net.now());
+  assert.equal(Object.keys(map.t).length, 20);
+});
+
+test("a full round nothing answered leaves the panel map as it was and is tried again in 30 min, not on every tick", async () => {
+  const members = ["m1", "m2", "m3"];
+  const panelsAt = Date.UTC(2026, 10, 17, 17);
+  const w = world({ panelsAt, healthAt: Date.UTC(2026, 10, 18, 11), hangAll: true, members });
+  const cat = await fresh("catalog.js");
+  const before = w.store.get("panels:v1");
+  const ticks = await untilReady(w, cat);
+  assert.equal(ticks.length, 5);
+  assert.equal(w.store.get("panels:v1"), before, "no account confirmed: the members keep their own confirmation time");
+  assert.ok(cat.healthReady(), "not again at once");
+  const n = w.log.length;
+  await w.net.run(w.net.request(29 * 60000));
+  assert.ok(cat.healthReady());
+  await w.net.run(w.net.request(2 * 60000));
+  assert.ok(!cat.healthReady(), "tried again after 30 min");
+  assert.equal(w.log.length, n);
 });

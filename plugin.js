@@ -2217,7 +2217,9 @@ async function selectServer(i) {
 var HEALTH_KEY = "health:v1";
 var HEALTH_TTL_MS = 6 * 60 * 60 * 1e3;
 var FULL_EVERY_MS = 18 * 60 * 60 * 1e3;
+var FULL_RETRY_MS = 30 * 60 * 1e3;
 var healthRunning = false;
+var fullRetry = null;
 function readHealth() {
   try {
     const o = JSON.parse(kino.storage.get(HEALTH_KEY) || "null");
@@ -2230,7 +2232,13 @@ var healthFresh = () => {
   const h = readHealth();
   return h && Date.now() - h.ts >= 0 && Date.now() - h.ts < HEALTH_TTL_MS ? h : null;
 };
-var healthReady = () => !!healthFresh();
+function fullDue(now = Date.now()) {
+  if (fullRetry && fullRetry.of === globalThis.kino && now >= fullRetry.until - FULL_RETRY_MS && now < fullRetry.until) return false;
+  const p = readPanels();
+  const age = p ? now - (Number(p.at) || 0) : NaN;
+  return !(age >= 0 && age < FULL_EVERY_MS);
+}
+var healthReady = () => !!healthFresh() && !fullDue();
 var HEALTH_TIMEOUT_MS = 1e4;
 var HEALTH_DEADLINE_MS = 15e3;
 var HEALTH_PARALLEL = 6;
@@ -2255,8 +2263,9 @@ function finishHealth({ st, answered, unprobed, sets, best }) {
   const online = list.filter((s) => answered.has(s.url)).map((s) => s.url);
   const now = Date.now();
   put(HEALTH_KEY, JSON.stringify({ ts: now, online: list.filter((s) => answered.has(s.url) || unprobed.has(s.url)).map((s) => s.url) }));
-  const map = sets ? groupPanels(sets, readPanels(), now) : readPanels();
-  if (sets) writePanels(map);
+  if (sets) fullRetry = { of: globalThis.kino, until: now + FULL_RETRY_MS };
+  const map = sets && sets.size ? groupPanels(sets, readPanels(), now) : readPanels();
+  if (sets && sets.size) writePanels(map);
   if (best) choose(best.s, best.data);
   const fresh = readSrvs() || st;
   const cur = fresh.list && fresh.list[fresh.idx];
@@ -2321,8 +2330,7 @@ async function healthStep() {
     const now = Date.now();
     if (!round || round.of !== globalThis.kino || !(now - round.at >= 0 && now - round.at < ROUND_MAX_MS)) {
       const st = await loadServers(false, { timeoutMs: LIST_TIMEOUT_MS });
-      const panels = readPanels();
-      const full = !panels || !(now - (Number(panels.at) || 0) >= 0 && now - (Number(panels.at) || 0) < FULL_EVERY_MS);
+      const full = fullDue(now);
       round = { of: globalThis.kino, at: now, st, full, order: healthOrder(st), next: 0, answered: /* @__PURE__ */ new Set(), sets: full ? /* @__PURE__ */ new Map() : null };
     }
     const r = round;
@@ -2345,6 +2353,7 @@ async function healthStep() {
     }
   } catch (_) {
     round = null;
+    fullRetry = { of: globalThis.kino, until: Date.now() + FULL_RETRY_MS };
     try {
       put(HEALTH_KEY, JSON.stringify({ ts: Date.now(), online: [] }));
     } catch (__) {

@@ -571,13 +571,26 @@ export async function selectServer(i) {
 const HEALTH_KEY = "health:v1";
 const HEALTH_TTL_MS = 6 * 60 * 60 * 1000;
 const FULL_EVERY_MS = 18 * 60 * 60 * 1000;
+// A full check that ended (the map written, or left as it was because nothing answered) is not started again in this
+// runtime for FULL_RETRY_MS: a map that could not be written does not restart the round on every tick.
+const FULL_RETRY_MS = 30 * 60 * 1000;
 let healthRunning = false;
+let fullRetry = null; // { of: the kino of this runtime, until }
 
 function readHealth() {
   try { const o = JSON.parse(kino.storage.get(HEALTH_KEY) || "null"); return o && Array.isArray(o.online) && typeof o.ts === "number" ? o : null; } catch (_) { return null; }
 }
 const healthFresh = () => { const h = readHealth(); return h && Date.now() - h.ts >= 0 && Date.now() - h.ts < HEALTH_TTL_MS ? h : null; };
-export const healthReady = () => !!healthFresh();
+// The panel map is missing or FULL_EVERY_MS old: the next round downloads live categories. The screen runs it then even
+// when the health result is still fresh: waiting for that result to age (up to 6 h more) could put the full round past the
+// 24 h after which the failover's same-panel step has no confirmed account left.
+function fullDue(now = Date.now()) {
+  if (fullRetry && fullRetry.of === globalThis.kino && now >= fullRetry.until - FULL_RETRY_MS && now < fullRetry.until) return false;
+  const p = readPanels();
+  const age = p ? now - (Number(p.at) || 0) : NaN;
+  return !(age >= 0 && age < FULL_EVERY_MS);
+}
+export const healthReady = () => !!healthFresh() && !fullDue();
 
 const HEALTH_TIMEOUT_MS = 10000;
 // The check runs inside one screen call (Kino gives it 20 s, ScreenLimits.CALL_TIMEOUT_MS): it stops starting probes at
@@ -609,15 +622,18 @@ function healthOrder(st) {
 }
 
 // Writes a finished check: health:v1 (what answered, plus what was left unprobed: not known down), the panel map when the
-// check downloaded categories ([sets]), the first run's pick ([best]), and the jump away from an active server that did not
-// answer: same panel, then same country, then by priority; the jump never touches `chosen` (backHome returns there).
+// check downloaded categories ([sets]; one that nothing answered leaves the map as it was, so the members keep their own
+// confirmation time instead of a fresh map with none confirmed), the first run's pick ([best]), and the jump away from an
+// active server that did not answer: same panel, then same country, then by priority; the jump never touches `chosen`
+// (backHome returns there).
 function finishHealth({ st, answered, unprobed, sets, best }) {
   const list = st.list || [];
   const online = list.filter((s) => answered.has(s.url)).map((s) => s.url);
   const now = Date.now();
   put(HEALTH_KEY, JSON.stringify({ ts: now, online: list.filter((s) => answered.has(s.url) || unprobed.has(s.url)).map((s) => s.url) }));
-  const map = sets ? groupPanels(sets, readPanels(), now) : readPanels();
-  if (sets) writePanels(map);
+  if (sets) fullRetry = { of: globalThis.kino, until: now + FULL_RETRY_MS };
+  const map = sets && sets.size ? groupPanels(sets, readPanels(), now) : readPanels();
+  if (sets && sets.size) writePanels(map);
   if (best) choose(best.s, best.data);
   const fresh = readSrvs() || st;
   const cur = fresh.list && fresh.list[fresh.idx];
@@ -684,8 +700,7 @@ export async function healthStep() {
     const now = Date.now();
     if (!round || round.of !== globalThis.kino || !(now - round.at >= 0 && now - round.at < ROUND_MAX_MS)) {
       const st = await loadServers(false, { timeoutMs: LIST_TIMEOUT_MS });
-      const panels = readPanels();
-      const full = !panels || !(now - (Number(panels.at) || 0) >= 0 && now - (Number(panels.at) || 0) < FULL_EVERY_MS);
+      const full = fullDue(now);
       round = { of: globalThis.kino, at: now, st, full, order: healthOrder(st), next: 0, answered: new Set(), sets: full ? new Map() : null };
     }
     const r = round;
@@ -704,8 +719,9 @@ export async function healthStep() {
     }
   } catch (_) {
     // No server list (the bootstrap is down and none is stored): written as a check with nothing online, as healthCheck
-    // does, so the screen's timer does not ask the bootstrap again every second.
+    // does, so the screen's timer does not ask the bootstrap again every second (nor for the panel map's full round).
     round = null;
+    fullRetry = { of: globalThis.kino, until: Date.now() + FULL_RETRY_MS };
     try { put(HEALTH_KEY, JSON.stringify({ ts: Date.now(), online: [] })); } catch (__) { /* nada */ }
   } finally { healthRunning = false; }
 }
