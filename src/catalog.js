@@ -840,6 +840,15 @@ function cachedLive(srv) {
 const cachedCats = (srv) => { const c = cachedLive(srv); return c ? c.list : null; };
 const cachedCatsAt = (srv) => { const c = cachedLive(srv); return c && typeof c.ts === "number" ? c.ts : null; };
 
+/** The active server's raw live category names by id, from its cached categories (any age): no request; "" when unknown. */
+export function liveCatNamer() {
+  const st = readSrvs();
+  const srv = st && Array.isArray(st.list) ? st.list[st.idx] : null;
+  const list = (srv && cachedCats(srv)) || [];
+  const names = new Map(list.map((c) => [String(c.category_id), String(c.category_name || "")]));
+  return (catId) => names.get(String(catId)) || "";
+}
+
 // The server list for a live resolve: the cached one (even past its 6 h), never a failover walk; the bootstrap only on a
 // fresh install, with short timeouts (resolve has 20 s).
 async function liveServers() {

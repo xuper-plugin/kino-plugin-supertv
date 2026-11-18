@@ -2436,6 +2436,13 @@ var cachedCatsAt = (srv) => {
   const c = cachedLive(srv);
   return c && typeof c.ts === "number" ? c.ts : null;
 };
+function liveCatNamer() {
+  const st = readSrvs();
+  const srv = st && Array.isArray(st.list) ? st.list[st.idx] : null;
+  const list = srv && cachedCats(srv) || [];
+  const names = new Map(list.map((c) => [String(c.category_id), String(c.category_name || "")]));
+  return (catId) => names.get(String(catId)) || "";
+}
 async function liveServers() {
   const st = readSrvs();
   if (st && Array.isArray(st.list) && st.list.length) return st;
@@ -2817,8 +2824,33 @@ function firstPickView({ servers, failed = false, device } = {}) {
 }
 
 // src/homeFeed.js
-var BASE = "https://raw.githubusercontent.com/xuper-plugin/kino-plugin-supertv/main/home/";
+var REPO = "https://raw.githubusercontent.com/xuper-plugin/kino-plugin-supertv/";
+var DIR = "home/";
+var DATA_MISS_KEY = "feedData:v1";
+var DATA_MISS_MS = 6 * 60 * 60 * 1e3;
 var MAX_AGE_MS = 3 * 24 * 60 * 60 * 1e3;
+var FEED_TIMEOUT_MS = 8e3;
+var dataMissAt = null;
+function dataMissing(now) {
+  if (dataMissAt === null) {
+    let v = null;
+    try {
+      v = kino.storage.get(DATA_MISS_KEY);
+    } catch (_) {
+      v = null;
+    }
+    dataMissAt = /^\d+$/.test(String(v || "")) ? Number(v) : 0;
+  }
+  const age = now - dataMissAt;
+  return dataMissAt > 0 && age >= 0 && age < DATA_MISS_MS;
+}
+function noteDataMissing(now) {
+  dataMissAt = now;
+  try {
+    put(DATA_MISS_KEY, String(now));
+  } catch (_) {
+  }
+}
 function openBox(box) {
   if (!box || typeof box !== "object" || box.v !== 1 || typeof box.iv !== "string" || typeof box.data !== "string") return null;
   try {
@@ -2833,23 +2865,79 @@ function railsOf(rails) {
   const r = rails.filter((x) => x && typeof x.id === "string" && typeof x.title === "string" && Array.isArray(x.items) && x.items.length);
   return r.length ? r : null;
 }
-async function fetchHomeFeed(serverKey2) {
+function feedOf(box, serverKey2) {
+  const d = openBox(box);
+  if (!d || d.v !== 1 || d.serverKey !== serverKey2 || !d.tabs || typeof d.tabs !== "object") return null;
+  if (typeof d.at === "number" && Date.now() - d.at > MAX_AGE_MS) return null;
+  const tabs = {};
+  for (const k of Object.keys(d.tabs)) {
+    const t = railsOf(d.tabs[k]);
+    if (t) tabs[k] = t;
+  }
+  return Object.keys(tabs).length ? { tabs } : null;
+}
+async function fetchCopy(branch, serverKey2, opts) {
+  let init = { headers: { Accept: "application/json" } };
+  if (opts && typeof opts.until === "number") {
+    const left = opts.until - Date.now() - 300;
+    if (left < 1e3) return { net: true };
+    init = { ...init, timeoutMs: Math.min(FEED_TIMEOUT_MS, left) };
+  }
+  let r;
+  try {
+    r = await kino.fetch(`${REPO}${branch}/${DIR}${encodeURIComponent(serverKey2)}.enc.json?v=${Math.floor(Date.now() / 36e5)}`, init);
+  } catch (_) {
+    return { net: true };
+  }
+  if (!r || !r.ok) return { miss: true };
+  try {
+    const feed = feedOf(JSON.parse(r.text()), serverKey2);
+    return feed ? { feed } : { miss: true };
+  } catch (_) {
+    return { miss: true };
+  }
+}
+async function fetchHomeFeed(serverKey2, opts) {
   if (!serverKey2) return null;
   try {
-    const r = await kino.fetch(`${BASE}${encodeURIComponent(serverKey2)}.enc.json?v=${Math.floor(Date.now() / 36e5)}`, { headers: { Accept: "application/json" } });
-    if (!r.ok) return null;
-    const d = openBox(JSON.parse(r.text()));
-    if (!d || d.v !== 1 || d.serverKey !== serverKey2 || !d.tabs || typeof d.tabs !== "object") return null;
-    if (typeof d.at === "number" && Date.now() - d.at > MAX_AGE_MS) return null;
-    const tabs = {};
-    for (const k of Object.keys(d.tabs)) {
-      const t = railsOf(d.tabs[k]);
-      if (t) tabs[k] = t;
+    if (!dataMissing(Date.now())) {
+      const d = await fetchCopy("data", serverKey2, opts);
+      if (d.feed) return d.feed;
+      if (d.net) return null;
+      noteDataMissing(Date.now());
     }
-    return Object.keys(tabs).length ? { tabs } : null;
+    const m = await fetchCopy("main", serverKey2, opts);
+    return m.feed || null;
   } catch (_) {
     return null;
   }
+}
+var BARE_REF = /^live:(\d+)$/;
+function upgradeBareRefs(rails, { catName, rawTitles = false } = {}) {
+  if (!Array.isArray(rails)) return rails;
+  return rails.map((r) => {
+    if (!r || !Array.isArray(r.items) || !/^\d+$/.test(String(r.catId || ""))) return r;
+    const catId = String(r.catId);
+    let catTok = null;
+    let changed = false;
+    const items = r.items.map((it) => {
+      const m = it && typeof it.ref === "string" ? BARE_REF.exec(it.ref) : null;
+      if (!m) return it;
+      if (catTok === null) {
+        let name = "";
+        try {
+          name = String(typeof catName === "function" && catName(catId) || "");
+        } catch (_) {
+          name = "";
+        }
+        catTok = categoryTok(name);
+      }
+      changed = true;
+      const tok = rawTitles && typeof it.title === "string" ? channelTok(it.title) : "";
+      return { ...it, ref: liveRef(m[1], catId, catTok, tok) };
+    });
+    return changed ? { ...r, items } : r;
+  });
 }
 
 // src/screen.js
@@ -2996,10 +3084,16 @@ function writeTabSnap(tab, rails) {
   } catch (_) {
   }
 }
+function catNames2() {
+  let names = null;
+  return (catId) => (names || (names = liveCatNamer()))(catId);
+}
+var feedRails = (rails, catName = catNames2()) => cleanRails(upgradeBareRefs(rails, { catName, rawTitles: true }), langNow());
 function readSnap(tab) {
   try {
     const o = JSON.parse(kino.storage.get(snapKey(tab)) || "null");
-    return o && o.v === SNAP_V && Array.isArray(o.rails) && o.rails.length ? { ...o, rails: cleanRails(o.rails, langNow()) } : null;
+    if (!(o && o.v === SNAP_V && Array.isArray(o.rails) && o.rails.length)) return null;
+    return { ...o, rails: cleanRails(upgradeBareRefs(o.rails, { catName: catNames2() }), langNow()) };
   } catch (_) {
     return null;
   }
@@ -3021,17 +3115,18 @@ async function autoPick() {
   } catch (_) {
   }
 }
-async function loadHomeFeed() {
+async function loadHomeFeed(opts) {
   homeFeedTried = true;
   let feed = null;
   try {
-    feed = await fetchHomeFeed(serverKey());
+    feed = await fetchHomeFeed(serverKey(), opts);
   } catch (_) {
     feed = null;
   }
   if (!feed || !feed.tabs) return;
+  const names = catNames2();
   for (const tab of Object.keys(feed.tabs)) {
-    const rails = cleanRails(feed.tabs[tab], langNow());
+    const rails = feedRails(feed.tabs[tab], names);
     homeFeedData.set(tab, rails);
     writeTabSnap(tab, rails);
   }
@@ -3163,10 +3258,10 @@ function mainView(ctx) {
     return firstPickView({ servers: pickServers, failed: !!(state.failed && state.failed.pick), device: ctx.device });
   }
   const tab = tabOf(state, ctx.route);
-  const feedRails = homeFeedData.get(tab);
+  const feedRails2 = homeFeedData.get(tab);
   const live = groupRails.get(tab) || null;
-  const snap = !feedRails && !live ? readSnap(tab) : null;
-  let data = feedRails ? { rails: feedRails, partial: false } : live || (snap ? { rails: snap.rails, partial: false, stale: true } : null);
+  const snap = !feedRails2 && !live ? readSnap(tab) : null;
+  let data = feedRails2 ? { rails: feedRails2, partial: false } : live || (snap ? { rails: snap.rails, partial: false, stale: true } : null);
   if (data && Array.isArray(data.rails)) data = { ...data, rails: randomizeRows(data.rails, homeSeed) };
   if (tab === TAB_IDS[0] && eventsRow) {
     const rest = (data && data.rails || []).filter((r) => r.id !== eventsRow.id);
@@ -3412,7 +3507,7 @@ async function section2(arg) {
       }
     }
     const feed = await fetchHomeFeed(serverKey());
-    const fr = feed && feed.tabs && feed.tabs[tab];
+    const fr = feed && feed.tabs && feed.tabs[tab] && upgradeBareRefs(feed.tabs[tab], { catName: catNames2(), rawTitles: true });
     if (fr && fr.length) return { tabs, tab, rows: fr.map((r) => ({ id: r.id, title: r.title, ref: "lcat:" + r.catId, items: r.items })) };
   } catch (_) {
   }

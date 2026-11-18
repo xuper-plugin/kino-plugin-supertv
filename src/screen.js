@@ -5,7 +5,7 @@ import * as cat from "./catalog.js";
 import { say, twin } from "./i18n.js";
 import { put } from "./store.js";
 import { TAB_IDS, browseView, searchView, liveView, settingsView, verifyingView, firstPickView, cardOf } from "./screenView.js";
-import { fetchHomeFeed } from "./homeFeed.js";
+import { fetchHomeFeed, upgradeBareRefs } from "./homeFeed.js";
 import { PLUGIN_VERSION } from "./version.js";
 import { cleanCards, cleanRails } from "./channelTitle.js";
 
@@ -125,11 +125,25 @@ function writeTabSnap(tab, rails) {
     }
   } catch (_) { /* almacenamiento lleno: sin snapshot */ }
 }
+
+// The active server's category names, looked up (from its cached categories, no request) only when a bare ref needs one.
+function catNames() {
+  let names = null;
+  return (catId) => (names || (names = cat.liveCatNamer()))(catId);
+}
+
+// A feed's rails as the screen shows them: bare refs from 0.4.0 code gain their category and the channel's raw name (the
+// feed's titles are still raw then), then the titles are cleaned.
+const feedRails = (rails, catName = catNames()) => cleanRails(upgradeBareRefs(rails, { catName, rawTitles: true }), cat.langNow());
+
 function readSnap(tab) {
   try {
     const o = JSON.parse(kino.storage.get(snapKey(tab)) || "null");
-    // A snapshot written by an older build (or from an older feed) carries decorated titles: cleaned when read.
-    return o && o.v === SNAP_V && Array.isArray(o.rails) && o.rails.length ? { ...o, rails: cleanRails(o.rails, cat.langNow()) } : null;
+    if (!(o && o.v === SNAP_V && Array.isArray(o.rails) && o.rails.length)) return null;
+    // A snapshot written by an older build (or from an older feed) carries decorated titles: cleaned when read. Its bare refs
+    // (0.4.0) gain their category, so the live failover covers a tap before the feed lands; its titles may be cleaned
+    // already, so they carry no channel name.
+    return { ...o, rails: cleanRails(upgradeBareRefs(o.rails, { catName: catNames() }), cat.langNow()) };
   } catch (_) { return null; }
 }
 
@@ -154,15 +168,17 @@ async function autoPick() {
 
 // Intenta el feed pre-armado del servidor (una sola descarga). Si llega, todas las pestañas quedan listas para pintar al
 // instante (sin tocar el IPTV) y se guarda un snapshot por tab; si no, se marca intentado y se cae a la carga en vivo. Nunca lanza.
-async function loadHomeFeed() {
+// opts.until: a deadline for the download (the first-run tick).
+async function loadHomeFeed(opts) {
   homeFeedTried = true;
   let feed = null;
-  try { feed = await fetchHomeFeed(cat.serverKey()); } catch (_) { feed = null; }
+  try { feed = await fetchHomeFeed(cat.serverKey(), opts); } catch (_) { feed = null; }
   if (!feed || !feed.tabs) return;
+  const names = catNames();
   for (const tab of Object.keys(feed.tabs)) {
     // The feed is built by the Action from the published code: a feed from before the title cleanup still carries the
-    // panels' decorated names. Cleaning again is a no-op on titles already clean.
-    const rails = cleanRails(feed.tabs[tab], cat.langNow());
+    // panels' decorated names (and bare refs). Cleaning again is a no-op on titles already clean.
+    const rails = feedRails(feed.tabs[tab], names);
     homeFeedData.set(tab, rails);
     writeTabSnap(tab, rails);
   }
@@ -498,7 +514,7 @@ export async function section(arg) {
   try {
     if (!cat.serverKey()) { try { await cat.serverList(); } catch (_) { /* sigue a vivo */ } }
     const feed = await fetchHomeFeed(cat.serverKey());
-    const fr = feed && feed.tabs && feed.tabs[tab];
+    const fr = feed && feed.tabs && feed.tabs[tab] && upgradeBareRefs(feed.tabs[tab], { catName: catNames(), rawTitles: true });
     if (fr && fr.length) return { tabs, tab, rows: fr.map((r) => ({ id: r.id, title: r.title, ref: "lcat:" + r.catId, items: r.items })) };
   } catch (_) { /* cae a la carga en vivo */ }
 
