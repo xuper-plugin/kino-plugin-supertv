@@ -1100,7 +1100,8 @@ function b64text(s) {
 // once (Kino runs 4 of a plugin's requests per host), each within GUIDE_TRY_MS, the whole call within GUIDE_MS: no request
 // starts with less than GUIDE_MIN_TRY_MS left (none after 3 s), so the slowest few finish instead of being dropped, and
 // Kino, which holds a call until every request it sent settles, never holds this one longer. 40 channels at 250 ms come to
-// 2.5 s, 50 to 3.25 s; a silent panel holds the call 3.5 s.
+// 2.5 s, 50 to 3.25 s. A panel that timed out or could not be reached before it answered anything is asked no more (the
+// rest would wait the same): a silent panel holds the call one GUIDE_TRY_MS, as in Ultra HD.
 const GUIDE_MAX = 50;
 const GUIDE_LANES = 4;
 const GUIDE_TRY_MS = 2500;
@@ -1117,11 +1118,20 @@ export async function guide({ channelIds, from, to }) {
   const srv = st && Array.isArray(st.list) ? st.list[st.idx] : null;
   if (!srv || !usable(srv)) return [];
   const out = [];
+  let answered = false;
+  let silent = false;
   await pool(ids, GUIDE_LANES, async ([cid, streamId]) => {
     const left = until - Date.now();
-    if (left < GUIDE_MIN_TRY_MS) return;
+    if (left < GUIDE_MIN_TRY_MS || silent) return;
+    let data;
     try {
-      const data = await callServer(srv, "get_short_epg", { stream_id: streamId, limit: "20" }, { timeoutMs: Math.min(GUIDE_TRY_MS, left) });
+      data = await callServer(srv, "get_short_epg", { stream_id: streamId, limit: "20" }, { timeoutMs: Math.min(GUIDE_TRY_MS, left) });
+      answered = true;
+    } catch (e) {
+      if (!answered && e && HOST_DOWN.has(e.code)) silent = true;
+      return;
+    }
+    try {
       const rows = Array.isArray(data) ? data : (data && (data.epg_listings || data.listings || data.epg)) || [];
       for (const e of rows) {
         const p = {

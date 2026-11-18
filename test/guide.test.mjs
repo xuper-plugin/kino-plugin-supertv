@@ -16,8 +16,8 @@ const A = { url: "http://a.example", username: "ua", password: "pa", name: "🇪
 const B = { url: "http://b.example", username: "ub", password: "pb", name: "🇪🇸" };
 const b64 = (s) => Buffer.from(s).toString("base64");
 
-// [epg]: ms until the active account answers each get_short_epg, or "hang" (until its timeout); [chosen]: B chosen while A
-// is active (backHome's case).
+// [epg]: ms until the active account answers each get_short_epg, "hang" (until its timeout), "down" (a network error after
+// 200 ms) or "late" (the first four in 300 ms, then hang); [chosen]: B chosen while A is active (backHome's case).
 function world({ epg = 300, chosen = false } = {}) {
   const start = Date.UTC(2026, 10, 17, 20);
   const net = virtualNet({ start, parallel: 6 });
@@ -36,8 +36,11 @@ function world({ epg = 300, chosen = false } = {}) {
     const lim = (init && init.timeoutMs) || 15000;
     if (action === "get_short_epg") {
       if (epg === "hang") return track(net.request(lim).then(() => { e.end = net.now(); return kinoError("timeout", "timed out"); }));
+      if (epg === "down") return track(net.request(200).then(() => { e.end = net.now(); return kinoError("network", "connection refused"); }));
+      // "late": the first four answer at once, every later one hangs (a panel that stops answering mid-call).
+      if (epg === "late" && log.filter((x) => x.action === "get_short_epg").length > 4) return track(net.request(lim).then(() => { e.end = net.now(); return kinoError("timeout", "timed out"); }));
       const now = Math.floor(start / 1000);
-      return track(net.request(epg).then(() => { e.end = net.now(); return res(200, { epg_listings: [{ title: b64("Programa " + param(url, "stream_id")), description: b64("x"), start_timestamp: String(now - 600), stop_timestamp: String(now + 1800) }] }); }));
+      return track(net.request(epg === "late" ? 300 : epg).then(() => { e.end = net.now(); return res(200, { epg_listings: [{ title: b64("Programa " + param(url, "stream_id")), description: b64("x"), start_timestamp: String(now - 600), stop_timestamp: String(now + 1800) }] }); }));
     }
     return track(net.request(400).then(() => { e.end = net.now(); return kinoError("network", "down"); }));
   }] });
@@ -91,16 +94,29 @@ test("a slow panel: the rounds already started finish, none starts after 3 s, th
   assert.equal(w.net.now() - t0, 3200);
 });
 
-test("a hanging panel: the call ends at its 3.5 s deadline, no other account is asked", async () => {
-  const w = world({ epg: "hang" });
+test("a silent panel: one round of 2.5 s, then nothing more is asked; one that cannot be reached: one round", async () => {
+  for (const [epg, took] of [["hang", 2500], ["down", 200]]) {
+    const w = world({ epg });
+    const cat = await fresh("catalog.js");
+    const t0 = w.net.now();
+    const out = await w.net.run(cat.guide({ channelIds: ids, from: 0, to: Infinity }));
+    await w.drain();
+    assert.deepEqual(out, []);
+    assert.equal(w.net.now() - t0, took, `${epg}: Kino holds the call ${w.net.now() - t0} ms`);
+    assert.ok(w.log.every((e) => e.host === "a.example"), "no other account is asked");
+    assert.equal(w.log.length, 4, `${epg}: the first four only`);
+  }
+});
+
+test("a panel that answered and then stops: still asked until the call's 3.5 s deadline, never past it", async () => {
+  const w = world({ epg: "late" });
   const cat = await fresh("catalog.js");
   const t0 = w.net.now();
   const out = await w.net.run(cat.guide({ channelIds: ids, from: 0, to: Infinity }));
   await w.drain();
-  assert.deepEqual(out, []);
-  assert.equal(w.net.now() - t0, 3500, "Kino holds the call to the deadline, not past it");
-  assert.ok(w.log.every((e) => e.host === "a.example"));
-  assert.equal(w.log.length, 8, "a 2.5 s round, then one cut to the 1 s left");
+  assert.equal(new Set(out.map((p) => p.channelId)).size, 4);
+  assert.equal(w.net.now() - t0, 3500, "the deadline");
+  assert.equal(epgOf(w).length, 12, "four answered, four timed out at 2.8 s, four cut to the 0.7 s left");
 });
 
 test("away from the chosen account: one backHome probe per call, with a short timeout", async () => {

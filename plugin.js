@@ -2685,11 +2685,20 @@ async function guide({ channelIds, from, to }) {
   const srv = st && Array.isArray(st.list) ? st.list[st.idx] : null;
   if (!srv || !usable(srv)) return [];
   const out = [];
+  let answered = false;
+  let silent = false;
   await pool(ids, GUIDE_LANES, async ([cid, streamId]) => {
     const left = until - Date.now();
-    if (left < GUIDE_MIN_TRY_MS) return;
+    if (left < GUIDE_MIN_TRY_MS || silent) return;
+    let data;
     try {
-      const data = await callServer(srv, "get_short_epg", { stream_id: streamId, limit: "20" }, { timeoutMs: Math.min(GUIDE_TRY_MS, left) });
+      data = await callServer(srv, "get_short_epg", { stream_id: streamId, limit: "20" }, { timeoutMs: Math.min(GUIDE_TRY_MS, left) });
+      answered = true;
+    } catch (e) {
+      if (!answered && e && HOST_DOWN.has(e.code)) silent = true;
+      return;
+    }
+    try {
       const rows = Array.isArray(data) ? data : data && (data.epg_listings || data.listings || data.epg) || [];
       for (const e of rows) {
         const p = {
