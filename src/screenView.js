@@ -9,6 +9,11 @@ const TAB_KEYS = { all: "tabAll", premium: "tabPremium", paises: "tabCountries",
 // screen.js runs several cheap units in one tick, so the first data comes a second after the open render.
 const POLL_MS = 1_000;
 const GRID_CAP = 60;
+// Kino draws at most 600 nodes of a screen and silently drops the rest (ScreenLimits.MAX_NODES). A rail costs 6 nodes plus
+// 3 per channel, the page around them 15 to 17: 13 rails (the events row and the feed's 12) of 12 channels come to 561 at
+// most, on a phone or a TV. Each rail's other channels are one tap away in "Ver todos".
+export const RAILS_SHOWN = 13;
+export const CARDS_SHOWN = 12;
 const HTTPS = /^https:\/\//;
 export const PRESS_MS = 30_000;
 
@@ -69,7 +74,7 @@ const roundRail = (items, key, titleProps, onMore) => ({
         { type: "TextButton", key: key + "More", ...twin("seeAll", "labelText"), onPressed: onMore },
       ] }
       : { type: "Text", ...titleProps, style: "h4" },
-    { type: "SingleChildScrollView", key: key + "Scroll", direction: "horizontal", children: [{ type: "Row", gap: 24, children: items.slice(0, 20).map((c, i) => roundChannel(c, key + "-" + i)) }] },
+    { type: "SingleChildScrollView", key: key + "Scroll", direction: "horizontal", children: [{ type: "Row", gap: 24, children: items.slice(0, CARDS_SHOWN).map((c, i) => roundChannel(c, key + "-" + i)) }] },
   ],
 });
 
@@ -84,7 +89,7 @@ export function browseView({ tab, data, loading, failed, device = "phone" }) {
   const active = TAB_IDS.includes(tab) ? tab : TAB_IDS[0];
   const body = [];
   if (data) {
-    for (const r of data.rails) {
+    for (const r of data.rails.slice(0, RAILS_SHOWN)) {
       body.push(roundRail(r.items, "rail-" + r.id, { text: r.title, textEn: r.title }, { event: "gocat", arg: r.catId }));
     }
     if (data.rails.length === 0) body.push({ type: "Text", ...twin("empty", "text"), color: "muted" });

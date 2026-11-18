@@ -75,8 +75,12 @@ async function world({ snapshot = false, noFeed = false } = {}) {
     }
     return { seen, ticks, every: ticks.length };
   }
-  return { run, log };
+  const render = async (device) => screen.screen({ route: { name: "main" }, state, device: { kind: device } });
+  return { run, log, render };
 }
+
+// Kino's count: every node object (it has a type) of the tree.
+const nodes = (o) => { if (!o || typeof o !== "object") return 0; let n = typeof o.type === "string" ? 1 : 0; for (const x of Array.isArray(o) ? o : Object.values(o)) n += nodes(x); return n; };
 
 test("a warm open (last session's snapshot on screen): the feed and the events row share the first tick, 1 s after the open", async () => {
   const w = await world({ snapshot: true });
@@ -106,4 +110,16 @@ test("no feed: the feed's misses, the categories and the tab's rows in one tick,
   assert.equal(ticks[0].req.filter((n) => n === "get_live_streams").length, 12);
   assert.equal(ticks[0].took, 600 + 3 * 600, "three rounds of four rows");
   assert.equal(seen.live, 1000 + 2400, "7.5 s before (one unit a tick, rows 3 at a time)");
+});
+
+test("the Home fits Kino's 600 nodes: the events row and all 12 feed rails, 12 channels each (20 before: about 870 nodes)", async () => {
+  const w = await world({ snapshot: true });
+  await w.run({});
+  for (const device of ["phone", "tv"]) {
+    const tree = await w.render(device);
+    const text = JSON.stringify(tree);
+    assert.ok(nodes(tree) <= 600, device + ": " + nodes(tree));
+    assert.equal((text.match(/"rail-lcat-[0-9]+"/g) || []).length, 13, "the events row and the feed's 12 rails");
+    assert.equal((text.match(/"ch-rail-lcat-2000-[0-9]+"/g) || []).length, 12);
+  }
 });

@@ -2759,6 +2759,8 @@ var TAB_IDS = ["all", "premium", "paises", "deportes", "radio"];
 var TAB_KEYS = { all: "tabAll", premium: "tabPremium", paises: "tabCountries", deportes: "tabSports", radio: "tabRadio" };
 var POLL_MS = 1e3;
 var GRID_CAP = 60;
+var RAILS_SHOWN = 13;
+var CARDS_SHOWN = 12;
 var HTTPS = /^https:\/\//;
 var PRESS_MS = 3e4;
 function cardOf(item) {
@@ -2827,7 +2829,7 @@ var roundRail = (items, key, titleProps, onMore) => ({
       { type: "Text", ...titleProps, style: "h4" },
       { type: "TextButton", key: key + "More", ...twin("seeAll", "labelText"), onPressed: onMore }
     ] } : { type: "Text", ...titleProps, style: "h4" },
-    { type: "SingleChildScrollView", key: key + "Scroll", direction: "horizontal", children: [{ type: "Row", gap: 24, children: items.slice(0, 20).map((c, i) => roundChannel(c, key + "-" + i)) }] }
+    { type: "SingleChildScrollView", key: key + "Scroll", direction: "horizontal", children: [{ type: "Row", gap: 24, children: items.slice(0, CARDS_SHOWN).map((c, i) => roundChannel(c, key + "-" + i)) }] }
   ]
 });
 var barButton = (key, icon, labelKey, onPressed) => ({ type: "IconButton", key, icon, ...twin(labelKey, "labelText"), ...twin(labelKey, "tooltip"), onPressed });
@@ -2836,7 +2838,7 @@ function browseView({ tab, data, loading, failed, device = "phone" }) {
   const active = TAB_IDS.includes(tab) ? tab : TAB_IDS[0];
   const body = [];
   if (data) {
-    for (const r of data.rails) {
+    for (const r of data.rails.slice(0, RAILS_SHOWN)) {
       body.push(roundRail(r.items, "rail-" + r.id, { text: r.title, textEn: r.title }, { event: "gocat", arg: r.catId }));
     }
     if (data.rails.length === 0) body.push({ type: "Text", ...twin("empty", "text"), color: "muted" });
