@@ -270,13 +270,14 @@ function backTarget(st) {
 
 // Tras un fallo (o el salto del chequeo de salud) se pasó a otro servidor: se vuelve al elegido por la persona (o al de casa)
 // en cuanto responde. Se mira cada 5 min; nunca a uno muerto o bloqueado (cero peticiones).
-async function backHome() {
-  const st = await loadServers(false);
+// opts.timeoutMs: the timeout of its requests (the guide keeps them short).
+async function backHome(opts) {
+  const st = await loadServers(false, opts);
   const target = backTarget(st);
   if (st.idx === target || Date.now() - (st.homeAt || 0) < 300000 || !usable(st.list[target])) return;
   st.homeAt = Date.now();
   try {
-    const data = await callServer(st.list[target], PROBE, {});
+    const data = await callServer(st.list[target], PROBE, {}, opts);
     st.idx = target; st.ok = true; st.okAt = Date.now();
     rememberLiveCats(st.list[target], data);
   } catch (_) { /* sigue en el actual */ }
@@ -972,26 +973,48 @@ function b64text(s) {
   }
 }
 
+// Native En vivo asks the guide of a category's first 40 visible channels in ONE call (LiveViewModel.requestEpg) before it
+// asks the categories and the channels, and those wait behind it on the plugin's single call lane: one get_short_epg per
+// channel, each through api() with its own backHome and a walk over every account, held the categories 2.4-4.4 s behind
+// 25-51 panel requests (2026-11-17, Redmi). Now a call asks only the first GUIDE_MAX channels (the top of the grid), on the
+// ACTIVE account alone (a stream id's guide is its panel's; another account's walk would only add requests), with one
+// backHome per call, GUIDE_LANES at once (Kino runs 4 of a plugin's requests per host), each within GUIDE_TRY_MS and the
+// whole call within GUIDE_MS. Channels past GUIDE_MAX get no programme from this call: Kino keeps that answer 30 min.
+const GUIDE_MAX = 12;
+const GUIDE_LANES = 4;
+const GUIDE_TRY_MS = 3000;
+const GUIDE_MS = 4000;
+const GUIDE_MIN_TRY_MS = 1000;
+
 export async function guide({ channelIds, from, to }) {
-  const ids = (Array.isArray(channelIds) ? channelIds : []).slice(0, 50);
-  const lists = await Promise.all(ids.map(async (cid) => {
-    const streamId = String(cid).replace(/^live-/, "");
-    if (!/^\d+$/.test(streamId)) return [];
+  const ids = (Array.isArray(channelIds) ? channelIds : []).map((cid) => [String(cid), String(cid).replace(/^live-/, "")])
+    .filter(([, streamId]) => /^\d+$/.test(streamId)).slice(0, GUIDE_MAX);
+  if (!ids.length) return [];
+  const until = Date.now() + GUIDE_MS;
+  if (readSrvs()) { try { await backHome({ timeoutMs: GUIDE_TRY_MS }); } catch (_) { /* stays on the active account */ } }
+  const st = readSrvs();
+  const srv = st && Array.isArray(st.list) ? st.list[st.idx] : null;
+  if (!srv || !usable(srv)) return [];
+  const out = [];
+  await pool(ids, GUIDE_LANES, async ([cid, streamId]) => {
+    const left = until - Date.now();
+    if (left < GUIDE_MIN_TRY_MS) return;
     try {
-      const data = await api("get_short_epg", { stream_id: streamId, limit: "20" });
+      const data = await callServer(srv, "get_short_epg", { stream_id: streamId, limit: "20" }, { timeoutMs: Math.min(GUIDE_TRY_MS, left) });
       const rows = Array.isArray(data) ? data : (data && (data.epg_listings || data.listings || data.epg)) || [];
-      return rows.map((e) => ({
-        channelId: String(cid),
-        title: b64text(e.title),
-        description: b64text(e.description || e.descr),
-        start: (parseInt(e.start_timestamp, 10) || 0) * 1000,
-        end: (parseInt(e.stop_timestamp || e.end_timestamp, 10) || 0) * 1000,
-      })).filter((e) => e.title && e.end > e.start && e.end > from && e.start < to);
-    } catch (_) {
-      return [];
-    }
-  }));
-  return lists.flat();
+      for (const e of rows) {
+        const p = {
+          channelId: cid,
+          title: b64text(e.title),
+          description: b64text(e.description || e.descr),
+          start: (parseInt(e.start_timestamp, 10) || 0) * 1000,
+          end: (parseInt(e.stop_timestamp || e.end_timestamp, 10) || 0) * 1000,
+        };
+        if (p.title && p.end > p.start && p.end > from && p.start < to) out.push(p);
+      }
+    } catch (_) { /* no guide for this channel this time */ }
+  });
+  return out;
 }
 
 // ---- resolve --------------------------------------------------------------------

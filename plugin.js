@@ -1945,13 +1945,13 @@ function backTarget(st) {
   }
   return homeIdx(st);
 }
-async function backHome() {
-  const st = await loadServers(false);
+async function backHome(opts) {
+  const st = await loadServers(false, opts);
   const target = backTarget(st);
   if (st.idx === target || Date.now() - (st.homeAt || 0) < 3e5 || !usable(st.list[target])) return;
   st.homeAt = Date.now();
   try {
-    const data = await callServer(st.list[target], PROBE, {});
+    const data = await callServer(st.list[target], PROBE, {}, opts);
     st.idx = target;
     st.ok = true;
     st.okAt = Date.now();
@@ -2570,26 +2570,45 @@ function b64text(s) {
     return str;
   }
 }
+var GUIDE_MAX = 12;
+var GUIDE_LANES = 4;
+var GUIDE_TRY_MS = 3e3;
+var GUIDE_MS = 4e3;
+var GUIDE_MIN_TRY_MS = 1e3;
 async function guide({ channelIds, from, to }) {
-  const ids = (Array.isArray(channelIds) ? channelIds : []).slice(0, 50);
-  const lists = await Promise.all(ids.map(async (cid) => {
-    const streamId = String(cid).replace(/^live-/, "");
-    if (!/^\d+$/.test(streamId)) return [];
+  const ids = (Array.isArray(channelIds) ? channelIds : []).map((cid) => [String(cid), String(cid).replace(/^live-/, "")]).filter(([, streamId]) => /^\d+$/.test(streamId)).slice(0, GUIDE_MAX);
+  if (!ids.length) return [];
+  const until = Date.now() + GUIDE_MS;
+  if (readSrvs()) {
     try {
-      const data = await api("get_short_epg", { stream_id: streamId, limit: "20" });
-      const rows = Array.isArray(data) ? data : data && (data.epg_listings || data.listings || data.epg) || [];
-      return rows.map((e) => ({
-        channelId: String(cid),
-        title: b64text(e.title),
-        description: b64text(e.description || e.descr),
-        start: (parseInt(e.start_timestamp, 10) || 0) * 1e3,
-        end: (parseInt(e.stop_timestamp || e.end_timestamp, 10) || 0) * 1e3
-      })).filter((e) => e.title && e.end > e.start && e.end > from && e.start < to);
+      await backHome({ timeoutMs: GUIDE_TRY_MS });
     } catch (_) {
-      return [];
     }
-  }));
-  return lists.flat();
+  }
+  const st = readSrvs();
+  const srv = st && Array.isArray(st.list) ? st.list[st.idx] : null;
+  if (!srv || !usable(srv)) return [];
+  const out = [];
+  await pool(ids, GUIDE_LANES, async ([cid, streamId]) => {
+    const left = until - Date.now();
+    if (left < GUIDE_MIN_TRY_MS) return;
+    try {
+      const data = await callServer(srv, "get_short_epg", { stream_id: streamId, limit: "20" }, { timeoutMs: Math.min(GUIDE_TRY_MS, left) });
+      const rows = Array.isArray(data) ? data : data && (data.epg_listings || data.listings || data.epg) || [];
+      for (const e of rows) {
+        const p = {
+          channelId: cid,
+          title: b64text(e.title),
+          description: b64text(e.description || e.descr),
+          start: (parseInt(e.start_timestamp, 10) || 0) * 1e3,
+          end: (parseInt(e.stop_timestamp || e.end_timestamp, 10) || 0) * 1e3
+        };
+        if (p.title && p.end > p.start && p.end > from && p.start < to) out.push(p);
+      }
+    } catch (_) {
+    }
+  });
+  return out;
 }
 function cachedLive(srv) {
   const k = keyOf(srv);
