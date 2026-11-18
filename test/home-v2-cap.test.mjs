@@ -30,13 +30,15 @@ const nodes = (rails, n, device) => {
   return count(browseView({ tab: "all", data, loading: true, failed: false, device }));
 };
 
-test("a full v2 tab with a full events row fits Kino's 600 nodes; v1's does not", () => {
+// Since the screen caps what it draws itself (13 rails of 12 channels, src/screenView.js), a full v1 tab fits too: v2's cap
+// now only saves bytes. Both must fit, on the phone and on the TV.
+test("a full v2 tab with a full events row fits Kino's 600 nodes, and so does a full v1 tab under the screen's own cap", () => {
   installKino();
   const rails = num("HOME_V2_RAILS"), items = num("HOME_V2_ITEMS");
   assert.equal(rails, num("RAILS_PER_TAB"), "v2 keeps every rail of a tab: only the cards are capped");
   assert.ok(items < num("RAIL_ITEMS"));
   for (const device of ["phone", "tv"]) {
     assert.ok(nodes(rails, items, device) <= MAX_NODES, `v2 on ${device}: ${nodes(rails, items, device)} nodes`);
-    assert.ok(nodes(num("RAILS_PER_TAB"), num("RAIL_ITEMS"), device) > MAX_NODES, "v1 is cut by Kino");
+    assert.ok(nodes(num("RAILS_PER_TAB"), num("RAIL_ITEMS"), device) <= MAX_NODES, `v1 on ${device}: ${nodes(num("RAILS_PER_TAB"), num("RAIL_ITEMS"), device)} nodes`);
   }
 });
