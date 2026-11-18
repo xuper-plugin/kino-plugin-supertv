@@ -1,6 +1,6 @@
 // The Home feed's source and its bare refs. The feed is read from the orphan `data` branch first and from `main` when that
-// copy is missing or unusable (then `data` is skipped for 6 h, in memory and in storage); a network error costs no second
-// request. Bare `live:<id>` refs that 0.4.0 code wrote, in a feed or a Home snapshot, gain their category (and, from a feed,
+// copy is missing or unusable; only a `data` 404 for a feed `main` serves makes `data` skipped for 6 h (in memory and in
+// storage); a network error costs no second request. Bare `live:<id>` refs that 0.4.0 code wrote, in a feed or a Home snapshot, gain their category (and, from a feed,
 // the channel's raw name) with no request, so the live failover covers Home rows right after the update.
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -85,10 +85,27 @@ test("a missing data copy falls back to main, and main alone is read for the nex
 });
 
 test("any non-2xx or unusable data copy falls back to main; a network error costs no second request and is not remembered", async () => {
-  for (const data of [500, "<html>not json</html>", JSON.stringify({ v: 1, iv: "x", data: "@@@" }), box(feedFor("other", { all: RAILS })), box(feedFor(KEY, { all: RAILS }, T - 4 * 24 * H))]) {
+  for (const data of [500, 429, "<html>not json</html>", JSON.stringify({ v: 1, iv: "x", data: "@@@" }), box(feedFor("other", { all: RAILS })), box(feedFor(KEY, { all: RAILS }, T - 4 * 24 * H))]) {
     const g = github({ data, main: box(feedFor(KEY, { all: RAILS })) });
     const hf = await fresh("homeFeed.js");
     assert.ok(await hf.fetchHomeFeed(KEY), String(data).slice(0, 40));
+    assert.deepEqual(g.branches(), ["data", "main"]);
+    // Only a 404 says the branch is missing: anything else is tried on data again next time.
+    assert.equal(g.kino.storage.get("feedData:v1"), null, String(data).slice(0, 40));
+    g.log.length = 0;
+    await hf.fetchHomeFeed(KEY);
+    assert.deepEqual(g.branches(), ["data", "main"], String(data).slice(0, 40));
+  }
+  // A data 404 that main cannot serve either (an account without a feed, or main no longer written): never remembered,
+  // or a later feed on data would be skipped for hours.
+  for (const main of [404, box(feedFor(KEY, { all: RAILS }, T - 4 * 24 * H))]) {
+    const g = github({ data: 404, main });
+    const hf = await fresh("homeFeed.js");
+    assert.equal(await hf.fetchHomeFeed(KEY), null);
+    assert.deepEqual(g.branches(), ["data", "main"]);
+    assert.equal(g.kino.storage.get("feedData:v1"), null, String(main).slice(0, 40));
+    g.log.length = 0;
+    await hf.fetchHomeFeed(KEY);
     assert.deepEqual(g.branches(), ["data", "main"]);
   }
   const g = github({ data: kinoError("network", "unreachable"), main: box(feedFor(KEY, { all: RAILS })) });

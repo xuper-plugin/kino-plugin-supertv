@@ -89,7 +89,10 @@ test("first tick: the top three race at once, the first good answer wins (never 
   assert.equal(feed.length, 1);
   assert.equal(feed[0].key, keyOf(ACC.g));
   assert.ok(feed[0].at >= race[0].at + 1200, "the feed comes after the winner, in the same tick");
-  assert.ok(w.net.now() - t0 < 4000, `content after ${w.net.now() - t0} ms (a hanging account does not hold it)`);
+  // The plugin's answer does not wait for the hanging account. Kino itself still holds the call until that request ends
+  // (the plugin does not set __kinoDropPendingFetches), which its timeout above caps at 4 s from the race's start.
+  assert.ok(w.net.now() - t0 < 4000, `the plugin's answer after ${w.net.now() - t0} ms (it does not await the hanging account)`);
+  assert.ok(race.find((e) => e.n === "h").timeoutMs <= 4000, "the hanging account holds Kino's call 4 s at most");
   const home = await d.view();
   assert.ok(home.includes("rail-lcat-2956") && home.includes('"live:201583~2956~es.dazn~es.hd.dazn.1"'), "the Home paints from the feed");
   assert.ok(!home.includes('"verifying"'));

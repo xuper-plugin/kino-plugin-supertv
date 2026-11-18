@@ -2942,12 +2942,13 @@ async function fetchCopy(branch, serverKey2, opts) {
   } catch (_) {
     return { net: true };
   }
-  if (!r || !r.ok) return { miss: true };
+  const status = r ? Number(r.status) || 0 : 0;
+  if (!r || !r.ok) return { miss: true, status };
   try {
     const feed = feedOf(JSON.parse(r.text()), serverKey2);
-    return feed ? { feed } : { miss: true };
+    return feed ? { feed } : { miss: true, status };
   } catch (_) {
-    return { miss: true };
+    return { miss: true, status };
   }
 }
 async function fetchHomeFeed(serverKey2, opts) {
@@ -2957,7 +2958,9 @@ async function fetchHomeFeed(serverKey2, opts) {
       const d = await fetchCopy("data", serverKey2, opts);
       if (d.feed) return d.feed;
       if (d.net) return null;
-      noteDataMissing(Date.now());
+      const m2 = await fetchCopy("main", serverKey2, opts);
+      if (m2.feed && d.status === 404) noteDataMissing(Date.now());
+      return m2.feed || null;
     }
     const m = await fetchCopy("main", serverKey2, opts);
     return m.feed || null;

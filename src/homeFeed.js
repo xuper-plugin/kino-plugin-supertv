@@ -9,8 +9,11 @@ import { categoryTok, channelTok } from "./channelMatch.js";
 // Where the feeds live. The Action force-pushes the complete current set to the orphan `data` branch on every run (no
 // history) and keeps the same paths on `main` while older installs still read only `main`. A device reads `data` first;
 // when that copy is missing or unusable (any non-2xx answer, or a body that does not open or fails the checks below; never
-// a network error, since `main` is on the same host) it reads the same path on `main` and skips `data` for DATA_MISS_MS
-// (in memory and in kino.storage, with the time it was seen), so it does not pay two requests per feed before `data` exists.
+// a network error, since `main` is on the same host) it reads the same path on `main`. Only a `data` 404 for a feed `main`
+// serves fresh says the branch does not exist yet: then `data` is skipped for DATA_MISS_MS (in memory and in kino.storage,
+// with the time it was seen), so a device does not pay two requests per feed before `data` exists. Anything else (a 5xx or
+// 429, an account `data` dropped, a copy missing on both) is never remembered: once `main` is no longer written, a mark set
+// by it would leave the Home without its feed for hours.
 const REPO = "https://raw.githubusercontent.com/xuper-plugin/kino-plugin-supertv/";
 const DIR = "home/";
 export const DATA_MISS_KEY = "feedData:v1";
@@ -62,8 +65,8 @@ function feedOf(box, serverKey) {
   return Object.keys(tabs).length ? { tabs } : null;
 }
 
-// One branch's copy: { feed }, { miss: true } (a non-2xx answer or an unusable body) or { net: true } (the request failed,
-// or the caller's deadline leaves no time for it).
+// One branch's copy: { feed }, { miss: true, status } (a non-2xx answer or an unusable body; the HTTP status) or
+// { net: true } (the request failed, or the caller's deadline leaves no time for it).
 async function fetchCopy(branch, serverKey, opts) {
   let init = { headers: { Accept: "application/json" } };
   if (opts && typeof opts.until === "number") {
@@ -76,11 +79,12 @@ async function fetchCopy(branch, serverKey, opts) {
     // El `v` por hora evita una caché de CDN demasiado pegajosa sin pedir siempre de nuevo.
     r = await kino.fetch(`${REPO}${branch}/${DIR}${encodeURIComponent(serverKey)}.enc.json?v=${Math.floor(Date.now() / 3600000)}`, init);
   } catch (_) { return { net: true }; }
-  if (!r || !r.ok) return { miss: true };
+  const status = r ? Number(r.status) || 0 : 0;
+  if (!r || !r.ok) return { miss: true, status };
   try {
     const feed = feedOf(JSON.parse(r.text()), serverKey);
-    return feed ? { feed } : { miss: true };
-  } catch (_) { return { miss: true }; }
+    return feed ? { feed } : { miss: true, status };
+  } catch (_) { return { miss: true, status }; }
 }
 
 /**
@@ -94,7 +98,9 @@ export async function fetchHomeFeed(serverKey, opts) {
       const d = await fetchCopy("data", serverKey, opts);
       if (d.feed) return d.feed;
       if (d.net) return null;
-      noteDataMissing(Date.now());
+      const m = await fetchCopy("main", serverKey, opts);
+      if (m.feed && d.status === 404) noteDataMissing(Date.now());
+      return m.feed || null;
     }
     const m = await fetchCopy("main", serverKey, opts);
     return m.feed || null;
