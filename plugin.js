@@ -509,7 +509,7 @@ var say = (key, lang, vars) => {
 };
 
 // src/version.js
-var PLUGIN_VERSION = "0.4.1";
+var PLUGIN_VERSION = "0.4.2";
 
 // src/panels.js
 var PANELS_KEY = "panels:v1";
