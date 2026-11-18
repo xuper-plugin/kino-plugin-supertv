@@ -3,6 +3,8 @@
 // plus the previous set's files carried forward (scripts/feed-set.mjs); the Action force-pushes that to the `data` branch
 // and copies what --main still needs for installed versions that read only `main`. The plugin pulls its account's file
 // and paints its Home at once.
+// Each feed also gets its v2 copy (<path>.v2.enc.json: gzip before sealing, only on `data`; contract in
+// scripts/feed-set.mjs), capped to what one screen can draw (HOME_V2_RAILS x HOME_V2_ITEMS per tab).
 // Solo se pre-arman CANALES ESTABLES (iguales todo el día). Los EVENTOS del momento (partidos con hora, "X vs Y", PPV, agenda)
 // cambian de un momento a otro: cachearlos los dejaría desfasados, así que se excluyen; esos se cargan en vivo normal.
 //   FEED_KEY=<64 hex> node scripts/gen-home.mjs --out <empty dir> [--prev <previous set>]
@@ -13,7 +15,6 @@ import { join, dirname, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { randomBytes, createCipheriv, createDecipheriv } from "node:crypto";
 import * as feedSet from "./feed-set.mjs";
 
 const arg = (name, def) => feedSet.argOf(process.argv, name, def);
@@ -39,22 +40,8 @@ const OUT_DIR = join(OUT, "home");
 const FEED_KEY = (process.env.FEED_KEY || "").trim();
 if (!/^[0-9a-fA-F]{64}$/.test(FEED_KEY)) { console.error("Falta FEED_KEY (64 hex). No se genera nada en claro."); process.exit(2); }
 const KEY = Buffer.from(FEED_KEY, "hex");
-// Sella un objeto -> sobre { v:1, iv:b64(12B), data:b64(ciphertext+tag16) } (mismo formato que seedBox.js).
-function seal(obj) {
-  const iv = randomBytes(12);
-  const c = createCipheriv("aes-256-gcm", KEY, iv);
-  const ct = Buffer.concat([c.update(JSON.stringify(obj), "utf8"), c.final()]);
-  return JSON.stringify({ v: 1, iv: iv.toString("base64"), data: Buffer.concat([ct, c.getAuthTag()]).toString("base64") });
-}
-// Opens a .enc.json (to read the `at` of a previous or `main` copy). null when it does not open.
-function openEnc(text) {
-  try {
-    const box = JSON.parse(text);
-    const iv = Buffer.from(box.iv, "base64"), data = Buffer.from(box.data, "base64");
-    const d = createDecipheriv("aes-256-gcm", KEY, iv); d.setAuthTag(data.subarray(data.length - 16));
-    return JSON.parse(Buffer.concat([d.update(data.subarray(0, data.length - 16)), d.final()]).toString("utf8"));
-  } catch (_) { return null; }
-}
+// Sealing and opening (v1: { v:1, iv:b64(12B), data:b64(ciphertext+tag16) }, the format of seedBox.js; v2: the same with
+// "v": 2 over the gzip of the JSON) live in scripts/feed-set.mjs, shared with Ultra HD.
 
 // Al re-crear el kino por servidor, un timer pendiente del servidor anterior (rate-limit) puede rechazar tarde: inofensivo.
 process.on("unhandledRejection", () => {});
@@ -67,6 +54,14 @@ const checked = validateManifest(readFileSync(join(root, "kino-plugin.json"), "u
 const TABS = ["all", "premium", "paises", "deportes", "radio"]; // = TAB_IDS del plugin
 const RAILS_PER_TAB = 12, RAIL_ITEMS = 20;
 const SCHEMA = 1;
+// The v2 copy carries what one screen can draw. A rail of round channels is 6 + 3 per card of Kino's 600 screen nodes, so
+// v1's 12 rails x 20 cards is always cut by Kino (a real feed's "all" tab: 806 nodes); 8 x 10 is 302 with the bar, 368
+// with a full events row on top (browseView counted, 2026-11-17). v1 keeps 12 x 20 for the installed versions.
+const HOME_V2_RAILS = 8, HOME_V2_ITEMS = 10;
+const v2Of = (_path, obj) => ({
+  ...obj,
+  tabs: Object.fromEntries(Object.entries(obj.tabs || {}).map(([tab, rails]) => [tab, feedSet.capRails(rails, HOME_V2_RAILS, HOME_V2_ITEMS)])),
+});
 
 const tmp = mkdtempSync(join(tmpdir(), "stv-gen-"));
 // Requests are counted (totals only, never URLs) so the log shows what each build spends against the harness cap.
@@ -131,13 +126,9 @@ async function buildServer() {
   return total ? { v: SCHEMA, at: Date.now(), serverKey: cat.serverKey(), tabs } : null;
 }
 
-// The `at` sealed in [dir]/[path] when it opens with this key and belongs to the key its name says; else null.
-const atIn = (dir) => (path) => {
-  try {
-    const d = openEnc(readFileSync(join(dir, path), "utf8"));
-    return d && d.serverKey === feedSet.keyOfPath(path) && typeof d.at === "number" ? d.at : null;
-  } catch (_) { return null; }
-};
+// The `at` sealed in [dir]/[path] when it opens with this key as the version its name says and belongs to the key its name
+// says; else null.
+const atIn = (dir) => (path) => feedSet.sealedAt(dir, path, KEY);
 
 mkdirSync(OUT_DIR, { recursive: true });
 const list = await cat.serverList();
@@ -152,6 +143,18 @@ console.log(`servidores a procesar: ${order.length} de ${items.length}`);
 let ok = 0, empty = 0, fail = 0;
 const builtKeys = new Set();
 const written = new Map(); // relative path -> the `at` sealed in it, for each feed this run wrote
+const kb = (n) => Math.round(n / 1024);
+// Writes the feed (v1) and its v2 copy, both of the same build. -> "<v1 KB> KB, v2 <KB> KB" for the log.
+const put = (path, obj) => {
+  if (!obj || obj.serverKey !== feedSet.keyOfPath(path)) throw new Error("not published: " + path + " was built for another account");
+  const enc = feedSet.sealFeed(obj, KEY, 1);
+  const enc2 = feedSet.sealFeed(v2Of(path, obj), KEY, 2);
+  writeFileSync(join(OUT, path), enc);
+  writeFileSync(join(OUT, feedSet.v2PathOf(path)), enc2);
+  written.set(path, obj.at);
+  written.set(feedSet.v2PathOf(path), obj.at);
+  return `${kb(enc.length)} KB, v2 ${kb(enc2.length)} KB`;
+};
 for (const i of order) {
   const t0 = performance.now();
   try {
@@ -169,32 +172,35 @@ for (const i of order) {
     // began on: the result then carries that account's serverKey and the readers reject it under this key's name. It is
     // never published; the previous set's copy is carried forward instead.
     if (home.serverKey !== key || cat.serverKey() !== key) { console.log(`#${i + 1} ${key} (${ms(t0)} ms): the build moved to another account midway; not published, the previous copy stays (${spent()})`); fail++; continue; }
-    const enc = seal(home);
-    writeFileSync(join(OUT_DIR, key + ".enc.json"), enc);
-    written.set(`home/${key}.enc.json`, home.at);
+    const size = put(`home/${key}.enc.json`, home);
     const nTabs = Object.keys(home.tabs).length;
     const nRails = Object.values(home.tabs).reduce((n, r) => n + r.length, 0);
-    console.log(`#${i + 1} ${key} (${ms(t0)} ms): ${nTabs} tabs, ${nRails} filas, ${Math.round(enc.length / 1024)} KB -> ${key}.enc.json (${spent()})`);
+    console.log(`#${i + 1} ${key} (${ms(t0)} ms): ${nTabs} tabs, ${nRails} filas, ${size} -> ${key}.enc.json (${spent()})`);
     ok++;
   } catch (e) { console.log(`#${i + 1} (${ms(t0)} ms): error ${feedSet.cleanError(e)}`); fail++; }
 }
 console.log(`\nlisto: ${ok} ok, ${empty} vacíos, ${fail} fallos.`);
 if (!ok) console.log("::warning::no account was built in this run; only the previous set's younger feeds are kept");
 
-// The complete current set: what this run wrote plus the previous set's files carried forward (scripts/feed-set.mjs).
+// The complete current set: what this run wrote plus the previous set's files carried forward (scripts/feed-set.mjs), and
+// a v2 copy for each carried feed that lacks one of the same build.
 const now = Date.now();
 const prevPaths = PREV ? feedSet.feedPaths(PREV, SUBDIRS) : [];
-const { carry, drop } = feedSet.carryPlan({ prevPaths, written, atOf: PREV ? atIn(PREV) : () => null, now });
+const { carry, drop, derive } = feedSet.carryPlan({ prevPaths, written, atOf: PREV ? atIn(PREV) : () => null, now });
 feedSet.copyFeeds(PREV, OUT, carry.map((c) => c.path));
-const set = new Map([...written, ...carry.map((c) => [c.path, c.at])]);
-const carried = new Set(carry.map((c) => c.path));
-writeFileSync(join(OUT, feedSet.META), JSON.stringify(feedSet.metaOf({ set, carried, now }), null, 1) + "\n");
+const made = feedSet.deriveV2({ dir: OUT, derive, key: KEY, v2Of });
+const set = new Map([...written, ...carry.map((c) => [c.path, c.at]), ...made]);
+const carried = new Set([...carry.map((c) => c.path), ...derive.filter((d) => made.has(d.path) && !written.has(d.from)).map((d) => d.path)]);
+const sizes = feedSet.sizesOf(OUT, set.keys());
+writeFileSync(join(OUT, feedSet.META), JSON.stringify(feedSet.metaOf({ set, carried, derived: new Set(made.keys()), sizes, now }), null, 1) + "\n");
 const why = (w) => drop.filter((d) => d.why === w).length;
-console.log(`set: ${set.size} files (${written.size} built, ${carry.length} carried forward); dropped ${drop.length} (${why("expired")} expired, ${why("unreadable")} unreadable)`);
+console.log(`set: ${set.size} files (${written.size} built, ${carry.length} carried forward, ${made.size} v2 copies made from a carried feed); dropped ${drop.length} (${why("expired")} expired, ${why("unreadable")} unreadable, ${why("mismatched")} v2 of another build)`);
+const win = feedSet.sizeWin(set, sizes);
+if (win.files) console.log(`v2: ${win.files} feeds, ${kb(win.v2)} KB against ${kb(win.v1)} KB in v1 (${Math.round((100 * win.v2) / win.v1)} %)`);
 
 // What `main` still needs for the installed versions that read only `main`.
 if (MAIN) {
   const plan = feedSet.mainPlan({ set, mainPaths: feedSet.feedPaths(MAIN, SUBDIRS), mainAtOf: atIn(MAIN), now, everyMs: MAIN_EVERY_MS });
   if (MAIN_PLAN) writeFileSync(MAIN_PLAN, feedSet.planLines(plan).map((l) => l + "\n").join(""));
-  console.log(`main: ${plan.write.length} to rewrite, ${plan.remove.length} to remove (copies older than ${Math.round(MAIN_EVERY_MS / 3600000)} h are rewritten)`);
+  console.log(`main: ${plan.write.length} to rewrite, ${plan.remove.length} to remove (copies older than ${Math.round(MAIN_EVERY_MS / 3600000)} h are rewritten; v2 copies never go there)`);
 }
