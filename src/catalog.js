@@ -216,8 +216,9 @@ const hostnameOf = (srv) => { try { return new URL(srv.url).hostname; } catch (_
 // One Xtream call. Remembers the account: dead (auth 0 / expired) for a day, blocked (Kino refuses this server's own host)
 // until the next version. A refusal of ANOTHER host (an ISP block that redirects to a government page over http) is a plain
 // failure: it depends on the network, not on the account. opts.timeoutMs: the health check and the failover keep it short.
+// [action] null: player_api.php with no action, the account's own small answer (`user_info`): the liveness probe.
 async function callServer(srv, action, extra, opts) {
-  const params = new URLSearchParams({ username: srv.username, password: srv.password, action, ...extra });
+  const params = new URLSearchParams({ username: srv.username, password: srv.password, ...(action ? { action } : {}), ...extra });
   let r;
   try {
     r = await kino.fetch(`${srv.url}/player_api.php?${params}`, {
@@ -240,7 +241,7 @@ async function callServer(srv, action, extra, opts) {
     noteDead(srv);
     throw Object.assign(new Error("cuenta no válida"), { dead: true });
   }
-  if (badAnswer(action, data)) throw new Error("respuesta inválida");
+  if (action ? badAnswer(action, data) : !(data && typeof data === "object" && data.user_info && typeof data.user_info === "object")) throw new Error("respuesta inválida");
   noteAlive(srv);
   return data;
 }
@@ -438,13 +439,16 @@ function listItems(st) {
 
 // ---- first-run auto-pick ---------------------------------------------------------------------------------------------
 const RACE_LANES = 3;          // accounts asked at once, one per panel host (Kino runs 6 of a plugin's requests, 4 per host)
-const RACE_TRY_MS = 4000;      // each account's timeout
+// Each account's timeout. On the Redmi (2026-11-17) working accounts answered in 0.5-1.0 s and dead ones in 0.8-1.0 s, while
+// a silent host held Kino's call to its whole timeout after the winner had answered (Kino holds a call until every request
+// it sent settles): 2.5 s, not 4 s. A working account slower than that is still found by the rescue's 10 s health check.
+const RACE_TRY_MS = 2500;
 const RACE_MIN_TRY_MS = 1500;  // no account starts with less time than this left before the race's deadline
 // The race's own deadline, counted from when the server list is in hand. The first-run tick keeps to 16 s of Kino's 20 s
 // call: the list (about 0.5-2.5 s, 4 s a request at most) + this race + the feed that loads right after the winner (the
 // screen keeps 2.5 s for it, the [until] it passes). Every account's timeout ends by this deadline, so Kino, which holds a
-// call until each request it sent has settled, never holds the tick past it. 9 s is two rounds of 4 s timeouts on each of
-// the three lanes, or some 25 dead accounts at about 1 s each.
+// call until each request it sent has settled, never holds the tick past it. 9 s is three rounds of 2.5 s timeouts on each
+// of the three lanes, or some 25 dead accounts at about 1 s each.
 const RACE_MS = 9000;
 
 // A failure that says the panel HOST is out of reach (its other accounts would wait the same), not the account.
@@ -558,15 +562,21 @@ export async function selectServer(i) {
 }
 
 // ---- chequeo de salud: para que el selector muestre solo los servidores que responden ----------------
+// The result (health:v1, the URLs that answered) is good for HEALTH_TTL_MS. On the screen it runs LAST, after the Home has
+// its content, in short ticks (healthStep): a channel the person taps waits for the plugin's call lane, so no tick of it
+// holds that lane long. Most rounds only ask each account if it is alive (player_api.php with no action, a small answer,
+// PING_TIMEOUT_MS); once the panel map is FULL_EVERY_MS old the round downloads each account's live categories instead and
+// groups the panels again, because the live failover only moves a channel within a panel to accounts confirmed in the last
+// 24 h (panels:v1). The first run's rescue still checks every account in one call (healthCheck).
 const HEALTH_KEY = "health:v1";
-const HEALTH_TTL_MS = 30 * 60 * 1000; // se revisa de nuevo cuando pasa esto
+const HEALTH_TTL_MS = 6 * 60 * 60 * 1000;
+const FULL_EVERY_MS = 18 * 60 * 60 * 1000;
 let healthRunning = false;
 
 function readHealth() {
   try { const o = JSON.parse(kino.storage.get(HEALTH_KEY) || "null"); return o && Array.isArray(o.online) && typeof o.ts === "number" ? o : null; } catch (_) { return null; }
 }
-const healthFresh = () => { const h = readHealth(); return h && Date.now() - h.ts < HEALTH_TTL_MS ? h : null; };
-export const healthNeeded = () => !healthFresh() && !healthRunning;
+const healthFresh = () => { const h = readHealth(); return h && Date.now() - h.ts >= 0 && Date.now() - h.ts < HEALTH_TTL_MS ? h : null; };
 export const healthReady = () => !!healthFresh();
 
 const HEALTH_TIMEOUT_MS = 10000;
@@ -576,6 +586,12 @@ const HEALTH_TIMEOUT_MS = 10000;
 const HEALTH_DEADLINE_MS = 15000;
 const HEALTH_PARALLEL = 6;
 const LIST_TIMEOUT_MS = 4000;
+// The screen's ticks: STEP_ACCOUNTS accounts each (Kino runs 6 of a plugin's requests at once), each within PING_TIMEOUT_MS
+// (alive?) or STEP_FULL_TIMEOUT_MS (its live categories). A round left unfinished for ROUND_MAX_MS starts again.
+const STEP_ACCOUNTS = 6;
+const PING_TIMEOUT_MS = 3000;
+const STEP_FULL_TIMEOUT_MS = 5000;
+const ROUND_MAX_MS = 30 * 60 * 1000;
 
 // At most [limit] calls of [fn] at once over [list].
 async function pool(list, limit, fn) {
@@ -585,13 +601,43 @@ async function pool(list, limit, fn) {
   }));
 }
 
+// The active server and the chosen one first, then the list's order.
+function healthOrder(st) {
+  const list = st.list || [];
+  const first = new Set([keyOf(list[st.idx]), st.chosen].filter(Boolean));
+  return [...list.filter((s) => first.has(keyOf(s))), ...list.filter((s) => !first.has(keyOf(s)))];
+}
+
+// Writes a finished check: health:v1 (what answered, plus what was left unprobed: not known down), the panel map when the
+// check downloaded categories ([sets]), the first run's pick ([best]), and the jump away from an active server that did not
+// answer: same panel, then same country, then by priority; the jump never touches `chosen` (backHome returns there).
+function finishHealth({ st, answered, unprobed, sets, best }) {
+  const list = st.list || [];
+  const online = list.filter((s) => answered.has(s.url)).map((s) => s.url);
+  const now = Date.now();
+  put(HEALTH_KEY, JSON.stringify({ ts: now, online: list.filter((s) => answered.has(s.url) || unprobed.has(s.url)).map((s) => s.url) }));
+  const map = sets ? groupPanels(sets, readPanels(), now) : readPanels();
+  if (sets) writePanels(map);
+  if (best) choose(best.s, best.data);
+  const fresh = readSrvs() || st;
+  const cur = fresh.list && fresh.list[fresh.idx];
+  if (cur && online.length && !online.includes(cur.url)) {
+    const p = panelOf(keyOf(cur), map);
+    const flag = flagOf(cur);
+    const score = (s) => [p && panelOf(keyOf(s), map) === p ? 0 : 1, flagOf(s) === flag ? 0 : 1, priorityOf(s)];
+    const cands = fresh.list.map((s, i) => ({ s, i, sc: score(s) })).filter((x) => online.includes(x.s.url))
+      .sort((a, b) => a.sc[0] - b.sc[0] || a.sc[1] - b.sc[1] || a.sc[2] - b.sc[2] || a.i - b.i);
+    if (cands.length) { fresh.idx = cands[0].i; fresh.ok = true; fresh.okAt = now; writeSrvs(fresh); }
+  }
+  return online.length;
+}
+
 // Probes the servers 6 at a time (never a dead or blocked account: zero requests), the active and the chosen one first, within
 // HEALTH_DEADLINE_MS (or [until], when sooner), and stores the URLs of those that answer; a server the deadline left unprobed is
 // stored with them (not known down: the picker keeps offering it), never as down. With the same answers it groups the servers
 // into panels (0 extra requests). [pick] (a first run whose race found no account): the probes go in the picker's ranking
 // and, with no server chosen yet, the best-ranked account that answered becomes the active and chosen one, with no further
-// request. Otherwise, when the active server is down it jumps to one that answered: same panel, then same country, then by
-// priority; the jump never touches `chosen` (backHome returns there). One run at a time; never throws.
+// request. One run at a time; never throws. The screen's own check is healthStep.
 export async function healthCheck({ until: limit = Infinity, pick = false } = {}) {
   if (healthRunning) return 0;
   healthRunning = true;
@@ -602,10 +648,8 @@ export async function healthCheck({ until: limit = Infinity, pick = false } = {}
     const sets = new Map();
     const answered = new Set();
     const unprobed = new Set();
-    const first = new Set([keyOf(list[st.idx]), st.chosen].filter(Boolean));
     const rank = new Map(list.map((s, i) => [s, priorityOf(s) * 1000 + i]));
-    const order = pick ? list.slice().sort((a, b) => rank.get(a) - rank.get(b))
-      : [...list.filter((s) => first.has(keyOf(s))), ...list.filter((s) => !first.has(keyOf(s)))];
+    const order = pick ? list.slice().sort((a, b) => rank.get(a) - rank.get(b)) : healthOrder(st);
     let best = null; // [pick]: the best-ranked account that answered, with its categories
     await pool(order, HEALTH_PARALLEL, async (s) => {
       if (!usable(s)) return;
@@ -618,26 +662,48 @@ export async function healthCheck({ until: limit = Infinity, pick = false } = {}
         if (pick && Array.isArray(data) && data.length && (!best || rank.get(s) < rank.get(best.s))) best = { s, data };
       } catch (_) { /* down */ }
     });
-    const online = list.filter((s) => answered.has(s.url)).map((s) => s.url);
-    const now = Date.now();
-    put(HEALTH_KEY, JSON.stringify({ ts: now, online: list.filter((s) => answered.has(s.url) || unprobed.has(s.url)).map((s) => s.url) }));
-    const map = groupPanels(sets, readPanels(), now);
-    writePanels(map);
-    if (best) choose(best.s, best.data);
-    const fresh = readSrvs() || st;
-    const cur = fresh.list && fresh.list[fresh.idx];
-    if (cur && online.length && !online.includes(cur.url)) {
-      const p = panelOf(keyOf(cur), map);
-      const flag = flagOf(cur);
-      const score = (s) => [p && panelOf(keyOf(s), map) === p ? 0 : 1, flagOf(s) === flag ? 0 : 1, priorityOf(s)];
-      const cands = fresh.list.map((s, i) => ({ s, i, sc: score(s) })).filter((x) => online.includes(x.s.url))
-        .sort((a, b) => a.sc[0] - b.sc[0] || a.sc[1] - b.sc[1] || a.sc[2] - b.sc[2] || a.i - b.i);
-      if (cands.length) { fresh.idx = cands[0].i; fresh.ok = true; fresh.okAt = now; writeSrvs(fresh); }
-    }
-    return online.length;
+    return finishHealth({ st, answered, unprobed, sets, best });
   } catch (_) {
     try { put(HEALTH_KEY, JSON.stringify({ ts: Date.now(), online: [] })); } catch (__) { /* nada */ }
     return 0;
+  } finally { healthRunning = false; }
+}
+
+let round = null; // the screen's check under way: { of, at, st, full, order, next, answered, sets }
+
+/**
+ * One tick of the screen's health check: the next STEP_ACCOUNTS usable accounts of the round (the active and the chosen one
+ * first), all at once. A round asks each account if it is alive, or, once the panel map is FULL_EVERY_MS old, downloads its
+ * live categories and groups the panels again. The round's last tick writes it (finishHealth); until then healthReady() stays
+ * false, so the screen keeps its timer for the next tick. Never throws.
+ */
+export async function healthStep() {
+  if (healthRunning) return;
+  healthRunning = true;
+  try {
+    const now = Date.now();
+    if (!round || round.of !== globalThis.kino || !(now - round.at >= 0 && now - round.at < ROUND_MAX_MS)) {
+      const st = await loadServers(false, { timeoutMs: LIST_TIMEOUT_MS });
+      const panels = readPanels();
+      const full = !panels || !(now - (Number(panels.at) || 0) >= 0 && now - (Number(panels.at) || 0) < FULL_EVERY_MS);
+      round = { of: globalThis.kino, at: now, st, full, order: healthOrder(st), next: 0, answered: new Set(), sets: full ? new Map() : null };
+    }
+    const r = round;
+    const slice = [];
+    while (r.next < r.order.length && slice.length < STEP_ACCOUNTS) { const s = r.order[r.next++]; if (usable(s)) slice.push(s); }
+    await pool(slice, STEP_ACCOUNTS, async (s) => {
+      try {
+        if (r.full) r.sets.set(keyOf(s), pairHashes(await callServer(s, PROBE, {}, { timeoutMs: STEP_FULL_TIMEOUT_MS })));
+        else await callServer(s, null, {}, { timeoutMs: PING_TIMEOUT_MS });
+        r.answered.add(s.url);
+      } catch (_) { /* down */ }
+    });
+    if (r.next >= r.order.length && round === r) {
+      round = null;
+      finishHealth({ st: r.st, answered: r.answered, unprobed: new Set(), sets: r.sets, best: null });
+    }
+  } catch (_) {
+    round = null;
   } finally { healthRunning = false; }
 }
 
@@ -677,9 +743,13 @@ export async function action(key) {
 const LIST_MEMO_MS = 3 * 60 * 1000;
 const LIST_MEMO_MAX = 8;
 const listMemo = new Map(); // "<serverKey>|<catId>" -> { ts, list, items? }
-let listMemoOf = null;      // the kino those lists were fetched with (a test's new kino starts empty)
+let listMemoOf = null;      // the kino those lists were fetched with
 const slimStream = (s) => ({ stream_id: s && s.stream_id, name: s && s.name, stream_icon: s && s.stream_icon, num: s && s.num, category_id: s && s.category_id });
-const memoFor = () => { if (listMemoOf !== globalThis.kino) { listMemo.clear(); listMemoOf = globalThis.kino; } return listMemo; };
+// Every in-memory list belongs to the kino it was fetched with (one per runtime; a test's new kino starts empty).
+const memoFor = () => {
+  if (listMemoOf !== globalThis.kino) { listMemo.clear(); for (const k of Object.keys(catMemo)) delete catMemo[k]; liveCatsMemo = null; listMemoOf = globalThis.kino; }
+  return listMemo;
+};
 
 function memoList(k, catId) {
   const m = k ? memoFor().get(k + "|" + catId) : null;
@@ -731,6 +801,7 @@ const CAT_ACTIONS = { vod: "get_vod_categories", series: "get_series_categories"
 const catMemo = {};
 
 async function categoryList(kind) {
+  memoFor();
   const key = serverKey();
   const m = catMemo[kind];
   if (key && m && m.key === key && Date.now() - m.ts < CACHE_TTL_MS) return m.list;
@@ -760,6 +831,7 @@ let liveCatsMemo = null;
 
 // Las categorías cambian de un servidor a otro: la caché lleva la clave del servidor activo.
 async function liveCats() {
+  memoFor();
   const key = serverKey();
   if (liveCatsMemo && key && liveCatsMemo.key === key && Date.now() - liveCatsMemo.ts < LIVE_CATS_TTL_MS) return liveCatsMemo.list;
   const merged = mergeLive(await categoryList("live"), { showAdult: true });

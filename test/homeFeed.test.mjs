@@ -248,3 +248,19 @@ test("Kino's native section asks on every tab switch: one feed download per runt
   await screen.section({ tab: "all" });
   assert.deepEqual(w.log, ["feed data", "feed data"]);
 });
+
+test("a stale health check runs after the Home's content and the events row, never before", async () => {
+  const feed = feedFor(null, { all: RAILS });
+  const w = await chosenWorld({ feed });
+  feed.serverKey = w.key;
+  w.store.set("health:v1", JSON.stringify({ ts: T - 7 * H, online: [SRV.url] }));
+  w.store.set("panels:v1", JSON.stringify({ v: 1, at: T - 2 * H, g: {}, t: {} }));
+  w.store.set("cats:live:" + w.key, JSON.stringify({ ts: T, l: [["2956", "ES ▎DAZN"], ["77", "DEPORTES EVENTOS"]] }));
+  const screen = await fresh("screen.js");
+  let state = {};
+  for (let i = 0; i < 6; i++) {
+    const r = await screen.screenEvent({ name: "tick", state, lang: "es" });
+    state = { ...state, ...(r && r.state) };
+  }
+  assert.deepEqual(w.log, ["feed data", "get_live_streams", "/player_api.php"], "the feed, the events row, then the liveness check");
+});

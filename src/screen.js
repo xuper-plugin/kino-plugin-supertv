@@ -28,7 +28,6 @@ let pickServers = null;       // lista para el selector de servidor (respaldo si
 let cacheKey = null;
 let autoPickTried = false;    // primera instalación: ya se intentó elegir servidor automáticamente (sin que la persona elija)
 let rescueTried = false;      // first run, the race found no account: the health check with its automatic pick ran
-let pickedNow = false;        // this runtime's first-run auto-pick chose the server: the health check waits for the Home
 const homeFeedData = new Map(); // tab -> [rails] del feed pre-armado (si se bajó): Home al instante, sin recorrer el IPTV
 let homeFeedTried = false;      // ya se intentó el feed (haya salido o no)
 let eventsRow = null;           // fila DINÁMICA de eventos en vivo (la única en vivo del Home); null = aún sin cargar/vacía
@@ -197,7 +196,7 @@ const FIRST_RUN_TICK_MS = 16000;
 const FEED_MIN_MS = 2500;
 
 // First run: the server is chosen automatically and remembered, so the person never has to pick one. The accounts of the
-// picker's ranking (Spanish first, never a dead or blocked one) race three at a time, 4 s each, the next starting as soon as
+// picker's ranking (Spanish first, never a dead or blocked one) race three at a time, 2.5 s each, the next starting as soon as
 // one fails, and the first that answers well is chosen (cat.autoPickServer). The feed then loads in this same tick, so the
 // Home paints right after it, and the health check runs once the Home shows (unitsFor). When no account answered in time
 // the next tick runs rescue(). The 🌐 button in the header still changes the server at any time.
@@ -206,7 +205,7 @@ async function autoPick() {
   const until = Date.now() + FIRST_RUN_TICK_MS;
   let r = null;
   try { r = await cat.autoPickServer({ until: until - FEED_MIN_MS }); } catch (_) { r = null; }
-  if (r && r.ok) await picked(!r.kept, until);
+  if (r && r.ok) await picked(until);
 }
 
 // The race found no account (every one it reached failed, or the slow ones needed more than 4 s): the health check (10 s per
@@ -217,15 +216,14 @@ async function rescue() {
   rescueTried = true;
   const until = Date.now() + FIRST_RUN_TICK_MS;
   try { await cat.healthCheck({ until: until - FEED_MIN_MS, pick: true }); } catch (_) { /* nothing chosen: the picker */ }
-  if (cat.hasChosenServer()) { await picked(true, until); return; }
+  if (cat.hasChosenServer()) { await picked(until); return; }
   try { pickServers = cat.cachedServerList(); } catch (_) { pickServers = null; } // no list stored: the "pick" unit fetches it
 }
 
-// A server was chosen for the person ([now]: in this runtime): remembered, then its feed while the tick has time for it.
-async function picked(now, until) {
+// A server was chosen for the person: remembered, then its feed while the tick has time for it.
+async function picked(until) {
   markServerChosen();
   cacheKey = cat.serverKey();
-  pickedNow = now;
   if (until - Date.now() >= FEED_MIN_MS) await loadHomeFeed({ until });
 }
 
@@ -323,14 +321,12 @@ function unitsFor(tab) {
   // First run: the auto-pick races the accounts and loads the feed in the same tick. When no account answered, the rescue
   // (health check + automatic pick + feed) runs in the next one; only when that finds none does the manual picker show.
   if (!serverChosen()) return autoPickTried ? ["rescue", "pick"] : ["autopick"];
-  let base;
-  // Right after the first-run auto-pick (its account just answered) the health check waits until the Home has content.
-  if (pickedNow) base = homeFeedData.has(tab) ? ["hfeed", "health"] : ["hfeed", "cats", "tab:" + tab, "health"];
-  else if (homeFeedData.has(tab)) base = ["hfeed", "health"];
-  else if (!homeFeedTried) base = ["hfeed", "health", "cats", "tab:" + tab];
-  else base = ["health", "cats", "tab:" + tab];
-  // La fila de eventos en vivo va AL FINAL (última prioridad) y solo en el Home (tab "all"): se carga "cuando pueda", sin bloquear.
-  if (tab === TAB_IDS[0] && eventsOn() && !eventsTried) base = [...base, "events"];
+  // The Home's content first (the feed, else the live categories and the tab's rows), then the live events row (only on
+  // the "all" tab), and the health check LAST, in short ticks of its own (cat.healthStep): it never holds the content, and
+  // a channel tapped meanwhile waits for one short tick at most. A failing account is walked past by every request anyway.
+  const base = homeFeedData.has(tab) ? ["hfeed"] : !homeFeedTried ? ["hfeed", "cats", "tab:" + tab] : ["cats", "tab:" + tab];
+  if (tab === TAB_IDS[0] && eventsOn() && !eventsTried) base.push("events");
+  base.push("health");
   return base;
 }
 
@@ -357,7 +353,7 @@ async function runUnit(unit) {
   if (unit === "events") { await loadEvents(); return; }
   if (unit === "hfeed") { await loadHomeFeed(); return; }
   if (unit === "cats") { liveCatsAll = await cat.liveCategories(); return; }
-  if (unit === "health") { await cat.healthCheck(); return; }
+  if (unit === "health") { await cat.healthStep(); return; }
   if (unit === "pick") { pickServers = await cat.serverList(); return; }
   const [, tab] = unit.split(":");
   await loadGroupTab(tab);
@@ -387,7 +383,6 @@ function mainView(ctx) {
     const rest = ((data && data.rails) || []).filter((r) => r.id !== eventsRow.id);
     data = { ...(data || { partial: false }), rails: [eventsRow, ...rest] };
   }
-  if (!data && !cat.healthReady() && !pickedNow && !(state.failed && state.failed.health)) return verifyingView({ device: ctx.device });
   const failed = unitsFor(tab).some((u) => state.failed && state.failed[u]);
   return browseView({ tab, data, loading: pendingUnit(state, tab) !== null, failed: !data && failed, device: ctx.device });
 }

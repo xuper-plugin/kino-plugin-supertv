@@ -1,6 +1,6 @@
 // The first open of a fresh install, in Kino's network and virtual time. The first tick runs the rolling race: the accounts
-// of the picker's ranking (Spanish first, never a dead or blocked one) three at a time, never two of one host, 4 s each, the
-// next starting as soon as one fails, within 9 s; the winner's feed loads in that same tick, so the Home paints right after
+// of the picker's ranking (Spanish first, never a dead or blocked one) three at a time, never two of one host, 2.5 s each,
+// the next starting as soon as one fails, within 9 s; the winner's feed loads in that same tick, so the Home paints right after
 // it, and the health check runs only once the Home shows. When the race finds no account, the next tick runs the health check
 // and picks the best-ranked account that answered, feed included; only when none answered does the manual picker show. A
 // choice already made is never touched.
@@ -150,18 +150,18 @@ test("D1, the device list: the race replaces each failed account and picks the w
   assert.ok(feed[0].at - raceStart <= 3000, `the winner after ${feed[0].at - raceStart} ms of race`);
   assert.ok(!race.some((e) => e.n === "us"), "no other account starts once there is a winner");
   // Kino's limits.
-  assert.ok(race.every((e) => e.timeoutMs > 0 && e.timeoutMs <= 4000), String(race.map((e) => e.timeoutMs)));
+  assert.ok(race.every((e) => e.timeoutMs > 0 && e.timeoutMs <= 2500), String(race.map((e) => e.timeoutMs)));
   assert.ok(w.inFlight.max <= 3, JSON.stringify(w.inFlight));
   assert.ok(Object.values(w.inFlight.maxHost).every((m) => m <= 1), JSON.stringify(w.inFlight.maxHost));
   assert.ok(t.requests <= 60);
-  // The hanging accounts hold Kino's call to their own 4 s timeout, never longer.
+  // The hanging account holds Kino's call to its own 2.5 s timeout, never longer (it was 4 s: d1-device.md's open point 1).
   for (const e of race.filter((x) => x.n === "kri" || x.n === "fv")) assert.equal(e.end - e.at, e.timeoutMs);
   assert.equal(t.took, Math.max(...race.map((e) => e.end)) - t.at, "Kino releases the call when the last account settles");
-  assert.ok(t.took <= BOOT_MS + 1050 + 4000, `the tick took ${t.took} ms`);
-  assert.ok(out.at <= 8000, `content ${out.at} ms after the open (0.4.0 on the device: about 16 s)`);
-  // The next tick runs the health check: the dead accounts are skipped, the choice stays.
+  assert.equal(t.took, BOOT_MS + 1050 + 2500, "fv, started at 1.05 s when cap died, holds the call to its 2.5 s (nex won at 1.9 s)");
+  assert.ok(out.at <= 5600, `content ${out.at} ms after the open (with 4 s tries: 7.05 s; 0.4.0 on the device: about 16 s)`);
+  // The health check comes after the Home's other units: the dead accounts are skipped, the choice stays.
   const n = w.log.length;
-  await d.tick();
+  for (let i = 0; i < 3 && !probes(w, n).length; i++) await d.tick();
   const health = probes(w, n).map((e) => e.n);
   assert.ok(!health.includes("cap") && !health.includes("xiq") && health.includes("zee"), health.join(","));
   assert.equal(srvs(w).chosen, keyOfAcc(w, "nex"));
@@ -179,7 +179,7 @@ test("a Spanish account still in flight wins over a faster foreign one; the fore
     const t = await d.tick();
     assert.equal(srvs(w).chosen, keyOfAcc(w, want), String(es2));
     assert.ok(!probes(w).some((e) => e.n === "us2"), "nothing new starts while the answer waits for the Spanish account");
-    assert.ok(t.took <= BOOT_MS + 4000 + FEED_MS, `took ${t.took}`);
+    assert.ok(t.took <= BOOT_MS + 2500 + FEED_MS, `took ${t.took}`);
   }
 });
 
@@ -196,7 +196,7 @@ test("never two accounts of one host at once; a host that timed out is not asked
   assert.deepEqual(race.map((e) => e.n), ["d", "p1", "g"], "p2 waits for its host, then its host timed out: never asked");
   assert.equal(w.inFlight.maxHost["p.example"], 1);
   assert.equal(srvs(w).chosen, undefined);
-  assert.ok(t1.took <= BOOT_MS + 4000, `nothing left to try: the race ends when p1 times out (${t1.took} ms)`);
+  assert.ok(t1.took <= BOOT_MS + 2500, `nothing left to try: the race ends when p1 times out (${t1.took} ms)`);
   assert.ok((await d.view()).includes('"verifying"'), "no picker after the race alone");
   // The rescue: the health check (every usable account, the dead one skipped) with its automatic pick; nobody answers.
   const n = w.log.length;
@@ -215,13 +215,13 @@ test("never two accounts of one host at once; a host that timed out is not asked
   assert.equal(w.store.get("srvChosen:v1"), undefined);
 });
 
-test("every raced account fails (dead, or slower than 4 s): the rescue picks the best-ranked account that answered, feed included, never the picker", async () => {
+test("every raced account fails (dead, or slower than 2.5 s): the rescue picks the best-ranked account that answered, feed included, never the picker", async () => {
   const w = world({ accounts: {
     es1: { url: "https://a.example", flag: "🇪🇸", b: { dead: 900 } },
     es2: { url: "https://b.example", flag: "🇪🇸", b: { dead: 1000 } },
-    es3: { url: "https://c.example", flag: "🇪🇸", b: 6000 },
-    es4: { url: "https://e.example", flag: "🇲🇽", b: 5500 },
-    us: { url: "https://f.example", flag: "🇺🇸", b: 5000 },
+    es3: { url: "https://c.example", flag: "🇪🇸", b: 3600 },
+    es4: { url: "https://e.example", flag: "🇲🇽", b: 3300 },
+    us: { url: "https://f.example", flag: "🇺🇸", b: 3000 },
   } });
   const d = await driver(w);
   const out = await d.run();
@@ -230,12 +230,12 @@ test("every raced account fails (dead, or slower than 4 s): the rescue picks the
   const [t1, t2] = d.ticks;
   const race = probes(w).filter((e) => e.at < t1.at + t1.took);
   assert.deepEqual(race.map((e) => e.n), ["es1", "es2", "es3", "es4", "us"], "each failure replaced in rank");
-  assert.ok(race.every((e) => e.timeoutMs <= 4000));
+  assert.ok(race.every((e) => e.timeoutMs <= 2500));
   assert.ok(t1.took <= BOOT_MS + 9000, `the race keeps to its 9 s (${t1.took} ms)`);
   // The rescue tick: health check (es1 and es2 are dead, skipped) and the pick, no further probe, then the feed.
   const rescue = w.log.slice(t2.from);
   assert.deepEqual(rescue.filter((e) => e.action).map((e) => e.n).sort(), ["es3", "es4", "us"]);
-  assert.ok(rescue.filter((e) => e.action).every((e) => e.timeoutMs > 4000), "the slow accounts get the health check's longer timeout");
+  assert.ok(rescue.filter((e) => e.action).every((e) => e.timeoutMs > 2500), "the slow accounts get the health check's longer timeout");
   assert.equal(srvs(w).chosen, keyOfAcc(w, "es3"), "Spanish first, then by rank (es4 answered sooner)");
   assert.equal(w.store.get("srvChosen:v1"), "1");
   assert.deepEqual(rescue.filter((e) => e.n === "feed").map((e) => e.key), [keyOfAcc(w, "es3")], "the feed in the same tick");
@@ -248,10 +248,11 @@ test("every raced account fails (dead, or slower than 4 s): the rescue picks the
 });
 
 test("the race keeps to its 9 s: a late account gets only the time left, none starts with under 1.5 s left, the tick ends with the deadline", async () => {
-  // Ranked as listed (all Spanish, one host each). Lane by lane: h1 and h2 hang to 4 s; d1-d4 die at 1.2 s each in the third
-  // lane; at 4 s d5 and h3 start (4 s each), at 4.8 s h4, at 5.2 s h5 with 3.8 s left; at 8 s only 1 s is left: nothing starts.
+  // Ranked as listed (all Spanish, one host each), three lanes, 2.5 s tries. h1 and h2 hang to 2.5 s while d1 and d2 die at
+  // 1.4 s each; at 2.5 s d3 and d4 start, at 2.8 s d5; at 3.9 s h3 and h4, at 4.2 s h5; at 6.4 s h6 and h7 (2.6 s left: their
+  // full 2.5 s); at 6.7 s h8 with only 2.3 s left; at 8.9 s 0.1 s is left: nothing starts.
   const accounts = { h1: { url: "https://h1.example", flag: "🇪🇸", b: "hang" }, h2: { url: "https://h2.example", flag: "🇪🇸", b: "hang" } };
-  for (let i = 1; i <= 5; i++) accounts["d" + i] = { url: `https://d${i}.example`, flag: "🇪🇸", b: { dead: 1200 } };
+  for (let i = 1; i <= 5; i++) accounts["d" + i] = { url: `https://d${i}.example`, flag: "🇪🇸", b: { dead: 1400 } };
   for (let i = 3; i <= 9; i++) accounts["h" + i] = { url: `https://h${i}.example`, flag: "🇪🇸", b: "hang" };
   accounts.slow = { url: "https://slow.example", flag: "🇪🇸", b: 2000 };
   const w = world({ accounts });
@@ -259,8 +260,8 @@ test("the race keeps to its 9 s: a late account gets only the time left, none st
   const t1 = await d.tick();
   const race = probes(w);
   const raceStart = race[0].at;
-  assert.deepEqual(race.map((e) => e.n), ["h1", "h2", "d1", "d2", "d3", "d4", "d5", "h3", "h4", "h5"]);
-  assert.equal(race.find((e) => e.n === "h5").timeoutMs, 3800, "the last account started gets only the time left");
+  assert.deepEqual(race.map((e) => e.n), ["h1", "h2", "d1", "d2", "d3", "d4", "d5", "h3", "h4", "h5", "h6", "h7", "h8"]);
+  assert.equal(race.find((e) => e.n === "h8").timeoutMs, 2300, "the last account started gets only the time left");
   assert.ok(race.every((e) => e.at - raceStart <= 9000 - 1500), "none starts with less than 1.5 s left");
   assert.ok(race.every((e) => e.end - raceStart <= 9000), String(race.map((e) => e.n + "@" + (e.end - raceStart))));
   assert.equal(t1.took, BOOT_MS + 9000, "Kino holds the call to the race's deadline, never past it");

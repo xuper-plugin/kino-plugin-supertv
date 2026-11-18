@@ -98,8 +98,8 @@ test("the picker and the first-run auto-pick never offer a dead account", async 
   assert.ok(!list.items.some((x) => x.host === "dead.example"));
   assert.ok(!list.items.some((x) => x.host === "off.example"), "offline after a fresh check");
   assert.equal(w.log.filter((e) => e.n === "dead").length, 1);
-  // 40 min later the health result is stale (every server listed again) but the dead account still is not.
-  advance(40 * 60000);
+  // 6 h later the health result is stale (every server listed again) but the dead account still is not.
+  advance(6 * H + 60000);
   const later = await cat.serverList();
   assert.equal(later.checked, false);
   assert.ok(later.items.some((x) => x.host === "off.example"));
