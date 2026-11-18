@@ -669,13 +669,54 @@ export async function action(key) {
 }
 
 
+// ---- category lists: one short memo for every reader ------------------------------------------------------------------
+// A live category's channel list, kept LIST_MEMO_MS per ACCOUNT and category (an account of a panel may carry only part of
+// its channels, and the failover checks each account's own list): Kino's pages, "Ver todos", the Home rows, the events row,
+// search and the failover's look-ups (callServerMemo) share one download. Slim entries (what those read), LIST_MEMO_MAX lists.
+const LIST_MEMO_MS = 3 * 60 * 1000;
+const LIST_MEMO_MAX = 8;
+const listMemo = new Map(); // "<serverKey>|<catId>" -> { ts, list, items? }
+let listMemoOf = null;      // the kino those lists were fetched with (a test's new kino starts empty)
+const slimStream = (s) => ({ stream_id: s && s.stream_id, name: s && s.name, stream_icon: s && s.stream_icon, num: s && s.num, category_id: s && s.category_id });
+const memoFor = () => { if (listMemoOf !== globalThis.kino) { listMemo.clear(); listMemoOf = globalThis.kino; } return listMemo; };
+
+function memoList(k, catId) {
+  const m = k ? memoFor().get(k + "|" + catId) : null;
+  return m && Date.now() - m.ts >= 0 && Date.now() - m.ts < LIST_MEMO_MS ? m : null;
+}
+
+function keepList(k, catId, data) {
+  if (!k || !Array.isArray(data)) return data;
+  memoFor();
+  const list = data.map(slimStream);
+  const key = k + "|" + catId;
+  listMemo.delete(key);
+  listMemo.set(key, { ts: Date.now(), list });
+  while (listMemo.size > LIST_MEMO_MAX) listMemo.delete(listMemo.keys().next().value);
+  return list;
+}
+
+// callServer through the memo for a category's channels (the live failover's calls): a hit costs no request.
+async function callServerMemo(srv, action, extra, opts) {
+  const catId = action === "get_live_streams" && extra && extra.category_id !== undefined ? String(extra.category_id) : null;
+  if (catId === null) return callServer(srv, action, extra, opts);
+  const m = memoList(keyOf(srv), catId);
+  if (m) return m.list;
+  return keepList(keyOf(srv), catId, await callServer(srv, action, extra, opts));
+}
+
 // Una categoría: vacía ([]) es válida; fallar lanza (se reintenta una vez, con respaldo de servidor dentro de api()).
+// A live category's channels come from the memo when the active account fetched them lately.
 async function fetchCategory(action, categoryId) {
+  const id = String(categoryId);
+  const live = action === "get_live_streams";
+  if (live) { const m = memoList(serverKey(), id); if (m) return m.list; }
   for (let attempt = 0; ; attempt++) {
     try {
-      const data = await api(action, { category_id: String(categoryId) });
+      const data = await api(action, { category_id: id });
       if (!Array.isArray(data)) throw new Error("respuesta que no es lista");
-      return data;
+      // api() may have answered from another account: the list is that account's (the active one now).
+      return live ? keepList(serverKey(), id, data) : data;
     } catch (e) {
       if (attempt >= 1 || (e && e.code === "rate_limited")) throw e;
     }
@@ -712,7 +753,7 @@ async function categoryList(kind) {
 
 // ---- live -----------------------------------------------------------------------
 
-const LIVE_PAGE = 200;
+const LIVE_PAGE = 500; // Kino's most per page (PluginLiveContract.MAX_CHANNELS_PER_PAGE)
 const LIVE_CATS_TTL_MS = 10 * 60 * 1000;
 let liveCatsMemo = null;
 
@@ -738,15 +779,16 @@ export async function liveCategories() {
   }));
 }
 
-// Página de una categoría en vivo (para "ver más" de una fila). Solo refs "lcat:<id>".
+// Página de una categoría en vivo (para "ver más" de una fila). Solo refs "lcat:<id>". Pages run over the WHOLE category
+// (it used to page over liveChannels' first page only, so it never showed more than 200 channels).
 export async function browse(ref, cursor) {
   const [prefix, catId] = String(ref || "").split(":");
   if (prefix !== "lcat" || !/^\d+$/.test(catId || "")) return { items: [] };
   const page = Math.max(1, parseInt(cursor, 10) || 1);
   const start = (page - 1) * PER_PAGE;
-  const out = await liveChannels({ categoryId: catId });
-  const all = out.items.map((i) => ({ id: i.id, ref: i.ref, title: i.title, kind: "live", poster: i.logo, ...(i.adult ? { adult: true } : {}) }));
-  return { items: all.slice(start, start + PER_PAGE), next: all.length > start + PER_PAGE ? String(page + 1) : undefined };
+  const all = await categoryItems(catId);
+  const items = all.slice(start, start + PER_PAGE).map((i) => ({ id: i.id, ref: i.ref, title: i.title, kind: "live", poster: i.logo, ...(i.adult ? { adult: true } : {}) }));
+  return { items, next: all.length > start + PER_PAGE ? String(page + 1) : undefined };
 }
 
 // The category's name by id, from the live categories in memory (the listing's own server).
@@ -778,17 +820,29 @@ function liveItem(s, categoryId, adult, shown) {
   };
 }
 
-export async function liveChannels({ categoryId, cursor }) {
-  const cat = (await liveCats().catch(() => [])).find((c) => c.id === String(categoryId));
-  const adult = !!(cat && cat.adult);
-  if (adult && !showAdult()) return { items: [] };
-  const all = await fetchCategory("get_live_streams", String(categoryId || ""));
-  const start = Math.max(0, parseInt(cursor, 10) || 0);
-  // Shown titles over the whole category (not the page): a channel looks the same on every page.
-  const shown = shownTitles(all, categoryKey(catNameOf(categoryId)));
+// Every channel of a live category as Kino lists it ([] for an 18+ category while 18+ is off). The list comes through the
+// memo, and its items are worked out once per list and language: the shown titles over the whole category (a channel looks
+// the same on every page), so every page after the first costs neither a request nor a cleanup.
+async function categoryItems(categoryId) {
+  const id = String(categoryId || "");
+  const c = (await liveCats().catch(() => [])).find((x) => x.id === id);
+  const adult = !!(c && c.adult);
+  if (adult && !showAdult()) return [];
+  const all = await fetchCategory("get_live_streams", id);
+  const m = memoList(serverKey(), id);
+  const tag = langNow() + (adult ? "|a" : "") + "|" + catNameOf(id);
+  if (m && m.list === all && m.items && m.items.tag === tag) return m.items.list;
+  const shown = shownTitles(all, categoryKey(catNameOf(id)));
   const items = [];
-  for (let i = start; i < Math.min(all.length, start + LIVE_PAGE); i++) { const it = liveItem(all[i], categoryId, adult, shown[i]); if (it) items.push(it); }
-  return { items, next: all.length > start + LIVE_PAGE ? String(start + LIVE_PAGE) : undefined };
+  for (let i = 0; i < all.length; i++) { const it = liveItem(all[i], id, adult, shown[i]); if (it) items.push(it); }
+  if (m && m.list === all) m.items = { tag, list: items };
+  return items;
+}
+
+export async function liveChannels({ categoryId, cursor }) {
+  const items = await categoryItems(categoryId);
+  const start = Math.max(0, parseInt(cursor, 10) || 0);
+  return { items: items.slice(start, start + LIVE_PAGE), next: items.length > start + LIVE_PAGE ? String(start + LIVE_PAGE) : undefined };
 }
 
 // The shown titles of one list of panel streams (`[{ name }]`) whose category's country or region is [catKey].
@@ -995,7 +1049,7 @@ const failover = createLiveFailover({
   cachedCats,
   catsAt: cachedCatsAt,
   storeCats: rememberLiveCats,
-  callServer,
+  callServer: callServerMemo,
   playUrl: (srv, id, format) => `${srv.url}/live/${srv.username}/${srv.password}/${id}.${format || liveFormat()}`,
   label: niceLabel,
   host: hostOf,

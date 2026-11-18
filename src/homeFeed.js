@@ -87,24 +87,47 @@ async function fetchCopy(branch, serverKey, opts) {
   } catch (_) { return { miss: true, status }; }
 }
 
+// The feed of [serverKey]: { feed }, { miss: true } (no usable copy on either branch) or { net: true }.
+async function loadFeed(serverKey, opts) {
+  try {
+    if (!dataMissing(Date.now())) {
+      const d = await fetchCopy("data", serverKey, opts);
+      if (d.feed) return d;
+      if (d.net) return d;
+      const m = await fetchCopy("main", serverKey, opts);
+      if (m.feed && d.status === 404) noteDataMissing(Date.now());
+      return m.feed || m.net ? m : { miss: true };
+    }
+    const m = await fetchCopy("main", serverKey, opts);
+    return m.feed || m.net ? m : { miss: true };
+  } catch (_) { return { net: true }; }
+}
+
 /**
  * El Home pre-armado del servidor, o null (sin feed, viejo, no abre, no coincide, o falló): `{ tabs: { all:[rails], ... } }`.
  * opts.until (ms): a deadline for both requests (each one gets at most FEED_TIMEOUT_MS); without it Kino's own timeout applies.
  */
 export async function fetchHomeFeed(serverKey, opts) {
   if (!serverKey) return null;
-  try {
-    if (!dataMissing(Date.now())) {
-      const d = await fetchCopy("data", serverKey, opts);
-      if (d.feed) return d.feed;
-      if (d.net) return null;
-      const m = await fetchCopy("main", serverKey, opts);
-      if (m.feed && d.status === 404) noteDataMissing(Date.now());
-      return m.feed || null;
-    }
-    const m = await fetchCopy("main", serverKey, opts);
-    return m.feed || null;
-  } catch (_) { return null; }
+  return (await loadFeed(serverKey, opts)).feed || null;
+}
+
+// One download per runtime and server for every reader (the screen's Home and Kino's native section, which asks on every
+// tab switch): a feed is kept FEED_MEMO_MS, the answer that there is none MISS_MEMO_MS, a network failure never.
+const FEED_MEMO_MS = 30 * 60 * 1000;
+const MISS_MEMO_MS = 5 * 60 * 1000;
+let feedMemo = null; // { of: the kino it was fetched with, key, at, feed }
+
+/** fetchHomeFeed through the runtime's memo. */
+export async function homeFeed(serverKey, opts) {
+  if (!serverKey) return null;
+  const now = Date.now();
+  const m = feedMemo;
+  const of = globalThis.kino;
+  if (m && m.of === of && m.key === serverKey && now - m.at >= 0 && now - m.at < (m.feed ? FEED_MEMO_MS : MISS_MEMO_MS)) return m.feed;
+  const r = await loadFeed(serverKey, opts);
+  if (!r.net) feedMemo = { of, key: serverKey, at: Date.now(), feed: r.feed || null };
+  return r.feed || null;
 }
 
 const BARE_REF = /^live:(\d+)$/;

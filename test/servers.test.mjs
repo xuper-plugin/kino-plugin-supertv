@@ -377,3 +377,63 @@ test("a Home snapshot and a search history written by an older build show clean 
   assert.ok(!search.includes("ES ▎") && !search.includes("|PT|"));
   assert.ok(search.includes('"live:201583"'), "refs untouched");
 });
+
+test("a category of 1,200 channels: Kino's pages of 500 and every 'Ver todos' page come from one download, past the old 200", async () => {
+  const w = world();
+  w.addCategory("4000", "ES ▎DEPORTES", Array.from({ length: 1200 }, (_, i) => [800000 + i, "ES ▎CANAL " + i]));
+  const cat = await fresh("catalog.js");
+  await cat.healthCheck();
+  const st = srvs(w);
+  st.idx = st.list.findIndex((s) => s.url === SRV.a1.url);
+  st.chosen = keyOf(srvOf("a1"));
+  w.store.set("srvs", JSON.stringify(st));
+  w.log.length = 0;
+  const p1 = await cat.liveChannels({ categoryId: "4000" });
+  assert.equal(p1.items.length, 500);
+  assert.equal(p1.next, "500");
+  const p3 = await cat.liveChannels({ categoryId: "4000", cursor: "1000" });
+  assert.equal(p3.items.length, 200);
+  assert.equal(p3.next, undefined);
+  assert.equal(p3.items[0].title, "CANAL 1000", "the shown title, cleaned over the whole category");
+  // "Ver todos": 60 a page over the whole category (it used to stop at the first 200).
+  const b4 = await cat.browse("lcat:4000", "4");
+  assert.deepEqual([b4.items[0].id, b4.items.length, b4.next], ["live-800180", 60, "5"]);
+  const b20 = await cat.browse("lcat:4000", "20");
+  assert.deepEqual([b20.items[0].id, b20.items.length, b20.next], ["live-801140", 60, undefined]);
+  assert.equal(w.log.filter((e) => e.action === "get_live_streams").length, 1, "one download for every page");
+  // After the memo's 3 minutes the category is asked again.
+  advance(3 * 60000 + 1);
+  await cat.liveChannels({ categoryId: "4000" });
+  assert.equal(w.log.filter((e) => e.action === "get_live_streams").length, 2);
+});
+
+test("the live failover and the listings share the category memo, per account", async () => {
+  const w = world({ probe: { a1: "509" } });
+  const cat = await fresh("catalog.js");
+  await cat.healthCheck();
+  const st = srvs(w);
+  st.idx = st.list.findIndex((s) => s.url === SRV.a1.url);
+  st.chosen = keyOf(srvOf("a1"));
+  w.store.set("srvs", JSON.stringify(st));
+  const ref = "live:201583~2956~es.dazn~es.hd.dazn.1";
+  await cat.resolve(ref);
+  const again = await cat.resolve(ref); // a1 refuses: the failover checks a2's own list of 2956, then moves there
+  assert.ok(again.url.startsWith(SRV.a2.url + "/live/"), again.url);
+  assert.equal(w.log.filter((e) => e.n === "a2" && e.action === "get_live_streams").length, 1);
+  // The person switches to a2 within 3 min: its listing of 2956 is the list the failover fetched, no new download.
+  const st2 = srvs(w);
+  st2.idx = st2.list.findIndex((s) => s.url === SRV.a2.url);
+  st2.chosen = keyOf(srvOf("a2"));
+  w.store.set("srvs", JSON.stringify(st2));
+  w.log.length = 0;
+  const page = await cat.liveChannels({ categoryId: "2956" });
+  assert.ok(page.items.length > 20);
+  assert.ok(!w.log.some((e) => e.action === "get_live_streams"), w.log.map((e) => e.n + " " + e.action).join(","));
+  // a1's list is a1's own: never served from a2's.
+  st2.idx = st2.list.findIndex((s) => s.url === SRV.a1.url);
+  st2.chosen = keyOf(srvOf("a1"));
+  w.store.set("srvs", JSON.stringify(st2));
+  w.log.length = 0;
+  await cat.liveChannels({ categoryId: "2956" });
+  assert.deepEqual(w.log.filter((e) => e.action === "get_live_streams").map((e) => e.n), ["a1"]);
+});

@@ -5,7 +5,7 @@ import * as cat from "./catalog.js";
 import { say, twin } from "./i18n.js";
 import { put, jsonLen } from "./store.js";
 import { TAB_IDS, browseView, searchView, liveView, settingsView, verifyingView, firstPickView, cardOf } from "./screenView.js";
-import { fetchHomeFeed, upgradeBareRefs } from "./homeFeed.js";
+import { homeFeed, upgradeBareRefs } from "./homeFeed.js";
 import { PLUGIN_VERSION } from "./version.js";
 import { cleanCards, cleanRails } from "./channelTitle.js";
 
@@ -235,7 +235,7 @@ async function picked(now, until) {
 async function loadHomeFeed(opts) {
   homeFeedTried = true;
   let feed = null;
-  try { feed = await fetchHomeFeed(cat.serverKey(), opts); } catch (_) { feed = null; }
+  try { feed = await homeFeed(cat.serverKey(), opts); } catch (_) { feed = null; }
   if (!feed || !feed.tabs) return;
   const names = catNames();
   for (const tab of Object.keys(feed.tabs)) {
@@ -576,11 +576,12 @@ export async function section(arg) {
   const english = /^en/i.test(String(kino.lang || ""));
   const tabs = SECTION_TABS.map((t) => ({ id: t.id, label: english ? t.en : t.label }));
 
-  // Primero el feed pre-armado (1 descarga): así la sección nativa de la pantalla de plugins sale al instante, SIN recorrer el
-  // IPTV. Necesita saber el servidor; si aún no se cargó la lista, se pide una vez (barato). Si no hay feed, cae a la carga en vivo.
+  // Primero el feed pre-armado (1 descarga por runtime, homeFeed): así la sección nativa sale al instante en cada pestaña, SIN
+  // recorrer el IPTV. Necesita saber el servidor; si aún no se cargó la lista, se pide una vez (barato). Si no hay feed, cae a
+  // la carga en vivo.
   try {
     if (!cat.serverKey()) { try { await cat.serverList(); } catch (_) { /* sigue a vivo */ } }
-    const feed = await fetchHomeFeed(cat.serverKey());
+    const feed = await homeFeed(cat.serverKey());
     const fr = feed && feed.tabs && feed.tabs[tab] && upgradeBareRefs(feed.tabs[tab], { catName: catNames(), rawTitles: true });
     if (fr && fr.length) return { tabs, tab, rows: fr.map((r) => ({ id: r.id, title: r.title, ref: "lcat:" + r.catId, items: r.items })) };
   } catch (_) { /* cae a la carga en vivo */ }

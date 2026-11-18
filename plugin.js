@@ -2330,12 +2330,51 @@ async function action(key) {
   }
   throw kino.error("not_found");
 }
+var LIST_MEMO_MS = 3 * 60 * 1e3;
+var LIST_MEMO_MAX = 8;
+var listMemo = /* @__PURE__ */ new Map();
+var listMemoOf = null;
+var slimStream = (s) => ({ stream_id: s && s.stream_id, name: s && s.name, stream_icon: s && s.stream_icon, num: s && s.num, category_id: s && s.category_id });
+var memoFor = () => {
+  if (listMemoOf !== globalThis.kino) {
+    listMemo.clear();
+    listMemoOf = globalThis.kino;
+  }
+  return listMemo;
+};
+function memoList(k, catId) {
+  const m = k ? memoFor().get(k + "|" + catId) : null;
+  return m && Date.now() - m.ts >= 0 && Date.now() - m.ts < LIST_MEMO_MS ? m : null;
+}
+function keepList(k, catId, data) {
+  if (!k || !Array.isArray(data)) return data;
+  memoFor();
+  const list = data.map(slimStream);
+  const key = k + "|" + catId;
+  listMemo.delete(key);
+  listMemo.set(key, { ts: Date.now(), list });
+  while (listMemo.size > LIST_MEMO_MAX) listMemo.delete(listMemo.keys().next().value);
+  return list;
+}
+async function callServerMemo(srv, action3, extra, opts) {
+  const catId = action3 === "get_live_streams" && extra && extra.category_id !== void 0 ? String(extra.category_id) : null;
+  if (catId === null) return callServer(srv, action3, extra, opts);
+  const m = memoList(keyOf(srv), catId);
+  if (m) return m.list;
+  return keepList(keyOf(srv), catId, await callServer(srv, action3, extra, opts));
+}
 async function fetchCategory(action3, categoryId) {
+  const id = String(categoryId);
+  const live = action3 === "get_live_streams";
+  if (live) {
+    const m = memoList(serverKey(), id);
+    if (m) return m.list;
+  }
   for (let attempt = 0; ; attempt++) {
     try {
-      const data = await api(action3, { category_id: String(categoryId) });
+      const data = await api(action3, { category_id: id });
       if (!Array.isArray(data)) throw new Error("respuesta que no es lista");
-      return data;
+      return live ? keepList(serverKey(), id, data) : data;
     } catch (e) {
       if (attempt >= 1 || e && e.code === "rate_limited") throw e;
     }
@@ -2365,7 +2404,7 @@ async function categoryList(kind) {
   put("cats:" + kind + ":" + now, JSON.stringify({ ts: Date.now(), l: list.map((c) => [c.category_id, c.category_name]) }));
   return list;
 }
-var LIVE_PAGE = 200;
+var LIVE_PAGE = 500;
 var LIVE_CATS_TTL_MS = 10 * 60 * 1e3;
 var liveCatsMemo = null;
 async function liveCats() {
@@ -2391,9 +2430,9 @@ async function browse(ref, cursor) {
   if (prefix !== "lcat" || !/^\d+$/.test(catId || "")) return { items: [] };
   const page = Math.max(1, parseInt(cursor, 10) || 1);
   const start = (page - 1) * PER_PAGE;
-  const out = await liveChannels({ categoryId: catId });
-  const all = out.items.map((i) => ({ id: i.id, ref: i.ref, title: i.title, kind: "live", poster: i.logo, ...i.adult ? { adult: true } : {} }));
-  return { items: all.slice(start, start + PER_PAGE), next: all.length > start + PER_PAGE ? String(page + 1) : void 0 };
+  const all = await categoryItems(catId);
+  const items = all.slice(start, start + PER_PAGE).map((i) => ({ id: i.id, ref: i.ref, title: i.title, kind: "live", poster: i.logo, ...i.adult ? { adult: true } : {} }));
+  return { items, next: all.length > start + PER_PAGE ? String(page + 1) : void 0 };
 }
 var catNames = { list: null, map: null };
 function catNameOf(catId) {
@@ -2417,19 +2456,28 @@ function liveItem(s, categoryId, adult, shown) {
     ...adult ? { adult: true } : {}
   };
 }
-async function liveChannels({ categoryId, cursor }) {
-  const cat = (await liveCats().catch(() => [])).find((c) => c.id === String(categoryId));
-  const adult = !!(cat && cat.adult);
-  if (adult && !showAdult()) return { items: [] };
-  const all = await fetchCategory("get_live_streams", String(categoryId || ""));
-  const start = Math.max(0, parseInt(cursor, 10) || 0);
-  const shown = shownTitles(all, categoryKey(catNameOf(categoryId)));
+async function categoryItems(categoryId) {
+  const id = String(categoryId || "");
+  const c = (await liveCats().catch(() => [])).find((x) => x.id === id);
+  const adult = !!(c && c.adult);
+  if (adult && !showAdult()) return [];
+  const all = await fetchCategory("get_live_streams", id);
+  const m = memoList(serverKey(), id);
+  const tag = langNow() + (adult ? "|a" : "") + "|" + catNameOf(id);
+  if (m && m.list === all && m.items && m.items.tag === tag) return m.items.list;
+  const shown = shownTitles(all, categoryKey(catNameOf(id)));
   const items = [];
-  for (let i = start; i < Math.min(all.length, start + LIVE_PAGE); i++) {
-    const it = liveItem(all[i], categoryId, adult, shown[i]);
+  for (let i = 0; i < all.length; i++) {
+    const it = liveItem(all[i], id, adult, shown[i]);
     if (it) items.push(it);
   }
-  return { items, next: all.length > start + LIVE_PAGE ? String(start + LIVE_PAGE) : void 0 };
+  if (m && m.list === all) m.items = { tag, list: items };
+  return items;
+}
+async function liveChannels({ categoryId, cursor }) {
+  const items = await categoryItems(categoryId);
+  const start = Math.max(0, parseInt(cursor, 10) || 0);
+  return { items: items.slice(start, start + LIVE_PAGE), next: items.length > start + LIVE_PAGE ? String(start + LIVE_PAGE) : void 0 };
 }
 var shownTitles = (streams, catKey) => channelTitles(streams.map((s) => s && s.name || ""), { cat: catKey, lang: langNow() });
 var SHOWN_ONLY = /·|\b(?:4k|8k|uhd|fhd|hd|sd|hevc)\b/;
@@ -2603,7 +2651,7 @@ var failover = createLiveFailover({
   cachedCats,
   catsAt: cachedCatsAt,
   storeCats: rememberLiveCats,
-  callServer,
+  callServer: callServerMemo,
   playUrl: (srv, id, format) => `${srv.url}/live/${srv.username}/${srv.password}/${id}.${format || liveFormat()}`,
   label: niceLabel,
   host: hostOf,
@@ -3025,22 +3073,34 @@ async function fetchCopy(branch, serverKey2, opts) {
     return { miss: true, status };
   }
 }
-async function fetchHomeFeed(serverKey2, opts) {
-  if (!serverKey2) return null;
+async function loadFeed(serverKey2, opts) {
   try {
     if (!dataMissing(Date.now())) {
       const d = await fetchCopy("data", serverKey2, opts);
-      if (d.feed) return d.feed;
-      if (d.net) return null;
+      if (d.feed) return d;
+      if (d.net) return d;
       const m2 = await fetchCopy("main", serverKey2, opts);
       if (m2.feed && d.status === 404) noteDataMissing(Date.now());
-      return m2.feed || null;
+      return m2.feed || m2.net ? m2 : { miss: true };
     }
     const m = await fetchCopy("main", serverKey2, opts);
-    return m.feed || null;
+    return m.feed || m.net ? m : { miss: true };
   } catch (_) {
-    return null;
+    return { net: true };
   }
+}
+var FEED_MEMO_MS = 30 * 60 * 1e3;
+var MISS_MEMO_MS = 5 * 60 * 1e3;
+var feedMemo = null;
+async function homeFeed(serverKey2, opts) {
+  if (!serverKey2) return null;
+  const now = Date.now();
+  const m = feedMemo;
+  const of = globalThis.kino;
+  if (m && m.of === of && m.key === serverKey2 && now - m.at >= 0 && now - m.at < (m.feed ? FEED_MEMO_MS : MISS_MEMO_MS)) return m.feed;
+  const r = await loadFeed(serverKey2, opts);
+  if (!r.net) feedMemo = { of, key: serverKey2, at: Date.now(), feed: r.feed || null };
+  return r.feed || null;
 }
 var BARE_REF = /^live:(\d+)$/;
 function upgradeBareRefs(rails, { catName, rawTitles = false } = {}) {
@@ -3305,7 +3365,7 @@ async function loadHomeFeed(opts) {
   homeFeedTried = true;
   let feed = null;
   try {
-    feed = await fetchHomeFeed(serverKey(), opts);
+    feed = await homeFeed(serverKey(), opts);
   } catch (_) {
     feed = null;
   }
@@ -3697,7 +3757,7 @@ async function section2(arg) {
       } catch (_) {
       }
     }
-    const feed = await fetchHomeFeed(serverKey());
+    const feed = await homeFeed(serverKey());
     const fr = feed && feed.tabs && feed.tabs[tab] && upgradeBareRefs(feed.tabs[tab], { catName: catNames2(), rawTitles: true });
     if (fr && fr.length) return { tabs, tab, rows: fr.map((r) => ({ id: r.id, title: r.title, ref: "lcat:" + r.catId, items: r.items })) };
   } catch (_) {

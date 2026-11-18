@@ -233,3 +233,18 @@ test("a feed load rewrites Kino's store twice: one snapshot entry for every tab,
   await plugin.screen({ route: { name: "main" }, state: { tab: "radio" }, device: { kind: "phone" } });
   assert.deepEqual(w.writes, []);
 });
+
+test("Kino's native section asks on every tab switch: one feed download per runtime, shared with the screen", async () => {
+  const feed = feedFor(null, { all: RAILS, deportes: RAILS });
+  const w = await chosenWorld({ feed });
+  feed.serverKey = w.key;
+  const screen = await fresh("screen.js");
+  for (const tab of ["all", "deportes", "radio", "all"]) await screen.section({ tab });
+  assert.deepEqual(w.log, ["feed data"], "one download for four calls");
+  await screen.screenEvent({ name: "tick", state: {}, lang: "es" });
+  assert.deepEqual(w.log, ["feed data"], "the screen's Home uses the same copy");
+  // Half an hour later the feed is asked again.
+  T += 30 * 60000;
+  await screen.section({ tab: "all" });
+  assert.deepEqual(w.log, ["feed data", "feed data"]);
+});
