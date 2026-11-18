@@ -17,8 +17,9 @@ const B = { url: "http://b.example", username: "ub", password: "pb", name: "🇪
 const b64 = (s) => Buffer.from(s).toString("base64");
 
 // [epg]: ms until the active account answers each get_short_epg, "hang" (until its timeout), "down" (a network error after
-// 200 ms) or "late" (the first four in 300 ms, then hang); [chosen]: B chosen while A is active (backHome's case).
-function world({ epg = 300, chosen = false } = {}) {
+// 200 ms) or "late" (the first four in 300 ms, then hang); [chosen]: B chosen while A is active (backHome's case);
+// [listAge]: how old the stored server list is, the bootstrap answering a renewal after [boot] ms.
+function world({ epg = 300, chosen = false, listAge = 0, boot = 2000 } = {}) {
   const start = Date.UTC(2026, 10, 17, 20);
   const net = virtualNet({ start, parallel: 6 });
   Date.now = net.now;
@@ -27,13 +28,17 @@ function world({ epg = 300, chosen = false } = {}) {
   const pending = new Set();
   const track = (p) => { inFlight.now++; inFlight.max = Math.max(inFlight.max, inFlight.now); const q = p.then((v) => { inFlight.now--; pending.delete(q); return v; }); pending.add(q); return q; };
   const k = installKino({ storage: {
-    srvs: JSON.stringify({ ts: start, list: [A, B], idx: 0, ok: true, okAt: start, ...(chosen ? { chosen: keyOf(B), homeAt: 0 } : { chosen: keyOf(A) }), mig: 1, v: 2 }),
+    srvs: JSON.stringify({ ts: start - listAge, list: [A, B], idx: 0, ok: true, okAt: start, ...(chosen ? { chosen: keyOf(B), homeAt: 0 } : { chosen: keyOf(A) }), mig: 1, v: 2 }),
   }, routes: [(url, init) => {
     const u = new URL(url);
     const action = param(url, "action");
     const e = { host: u.hostname, action, at: net.now(), timeoutMs: init && init.timeoutMs };
     log.push(e);
     const lim = (init && init.timeoutMs) || 15000;
+    if (u.hostname === "vegetatvv2.duckdns.org") {
+      const servers_text = [A, B].map((s) => `${s.url}/get.php?username=${s.username}&password=${s.password} [${s.name}]`).join("\n");
+      return track(net.request(Math.min(boot, lim)).then(() => { e.end = net.now(); return boot > lim ? kinoError("timeout", "timed out") : res(200, { ok: true, servers_text }); }));
+    }
     if (action === "get_short_epg") {
       if (epg === "hang") return track(net.request(lim).then(() => { e.end = net.now(); return kinoError("timeout", "timed out"); }));
       if (epg === "down") return track(net.request(200).then(() => { e.end = net.now(); return kinoError("network", "connection refused"); }));
@@ -132,4 +137,18 @@ test("away from the chosen account: one backHome probe per call, with a short ti
   const onA = epgOf(w).filter((e) => e.host === "a.example");
   assert.equal(onA.length, 36, "B did not answer (0.4 s): the guide stays on A, nine rounds of 0.3 s within the call's 3.5 s");
   assert.ok(w.net.now() - t0 <= 3500);
+});
+
+test("a server list 7 h old: the guide renews nothing (the next api() call does) and answers all 40; past 24 h it renews", async () => {
+  const H = 3600000;
+  for (const [listAge, boots, answered, took] of [[7 * H, 0, 40, 2500], [25 * H, 1, 20, 3250]]) {
+    const w = world({ epg: 250, listAge });
+    const cat = await fresh("catalog.js");
+    const t0 = w.net.now();
+    const out = await w.net.run(cat.guide({ channelIds: ids, from: 0, to: Infinity }));
+    await w.drain();
+    assert.equal(w.log.filter((e) => e.host === "vegetatvv2.duckdns.org").length, boots, `${listAge / H} h: bootstrap requests`);
+    assert.equal(new Set(out.map((p) => p.channelId)).size, answered, `${listAge / H} h: channels with a programme (2 s of bootstrap leave 1.5 s)`);
+    assert.equal(w.net.now() - t0, took, `${listAge / H} h: Kino holds the call`);
+  }
 });

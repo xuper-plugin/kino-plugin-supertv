@@ -177,11 +177,18 @@ function carryOver(prev, st) {
   return st;
 }
 
+// The list is asked again once it is CACHE_TTL_MS old, by whichever call needs it first. opts.stale (the guide's backHome)
+// takes the cached list up to SRVS_STALE_MS old instead: the guide is native En vivo's first call after 6 h, and its 1-4
+// bootstrap requests in a row came out of the guide's 3.5 s, so the channels it had no time left for stayed without a
+// programme in Kino for 30 min. The next call that asks a panel through api() renews the list as before, and past
+// SRVS_STALE_MS the guide does too.
+const SRVS_STALE_MS = 24 * 60 * 60 * 1000;
 // Estado en storage: { ts, list, idx (servidor activo), ok (idx ya comprobado), chosen (clave del elegido por la persona) }.
 async function loadServers(force, opts) {
   const cached = migrate(readSrvs());
   const usableList = cached && Array.isArray(cached.list) && cached.list.length;
-  if (!force && usableList && cached.ts && cached.v === SRVS_V && Date.now() - cached.ts < CACHE_TTL_MS) return cached;
+  const ttl = opts && opts.stale ? SRVS_STALE_MS : CACHE_TTL_MS;
+  if (!force && usableList && cached.ts && cached.v === SRVS_V && Date.now() - cached.ts < ttl) return cached;
   try {
     const list = await fetchServerList(opts);
     const st = carryOver(usableList ? cached : null, { ts: Date.now(), list, idx: 0, ok: false, v: SRVS_V });
@@ -1113,7 +1120,7 @@ export async function guide({ channelIds, from, to }) {
     .filter(([, streamId]) => /^\d+$/.test(streamId)).slice(0, GUIDE_MAX);
   if (!ids.length) return [];
   const until = Date.now() + GUIDE_MS;
-  if (readSrvs()) { try { await backHome({ timeoutMs: GUIDE_TRY_MS }); } catch (_) { /* stays on the active account */ } }
+  if (readSrvs()) { try { await backHome({ timeoutMs: GUIDE_TRY_MS, stale: true }); } catch (_) { /* stays on the active account */ } }
   const st = readSrvs();
   const srv = st && Array.isArray(st.list) ? st.list[st.idx] : null;
   if (!srv || !usable(srv)) return [];

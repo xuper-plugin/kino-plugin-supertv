@@ -1866,10 +1866,12 @@ function carryOver(prev, st) {
   }
   return st;
 }
+var SRVS_STALE_MS = 24 * 60 * 60 * 1e3;
 async function loadServers(force, opts) {
   const cached = migrate(readSrvs());
   const usableList = cached && Array.isArray(cached.list) && cached.list.length;
-  if (!force && usableList && cached.ts && cached.v === SRVS_V && Date.now() - cached.ts < CACHE_TTL_MS) return cached;
+  const ttl = opts && opts.stale ? SRVS_STALE_MS : CACHE_TTL_MS;
+  if (!force && usableList && cached.ts && cached.v === SRVS_V && Date.now() - cached.ts < ttl) return cached;
   try {
     const list = await fetchServerList(opts);
     const st = carryOver(usableList ? cached : null, { ts: Date.now(), list, idx: 0, ok: false, v: SRVS_V });
@@ -2677,7 +2679,7 @@ async function guide({ channelIds, from, to }) {
   const until = Date.now() + GUIDE_MS;
   if (readSrvs()) {
     try {
-      await backHome({ timeoutMs: GUIDE_TRY_MS });
+      await backHome({ timeoutMs: GUIDE_TRY_MS, stale: true });
     } catch (_) {
     }
   }
