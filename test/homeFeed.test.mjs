@@ -318,3 +318,31 @@ test("a stale health check runs after the Home's content and the events row, nev
   }
   assert.deepEqual(w.log, ["feed data.v2", "get_live_streams", "/player_api.php"], "the feed, the events row, then the liveness check");
 });
+
+test("feedKeys: the server keys with a home feed younger than the readers' 72 h in data-meta.json, v2 copies included; null when unusable", async () => {
+  const meta = {
+    v: 1, at: T, maxAgeMs: 72 * H, files: {
+      "home/1fresh.enc.json": { builtAt: T - 2 * H },
+      "home/2carry.enc.json": { builtAt: T - 70 * H, carried: true },
+      "home/3gzip.v2.enc.json": { builtAt: T - H },
+      "home/4old.enc.json": { builtAt: T - 73 * H, carried: true },
+      "home/5bad.enc.json": { builtAt: "yesterday" },
+      "live/6live.enc.json": { builtAt: T },
+      "home/7lang.es-419.enc.json": { builtAt: T },
+    },
+  };
+  for (const [answer, want] of [
+    [res(200, JSON.stringify(meta)), ["1fresh", "2carry", "3gzip"]],
+    [res(404, "404: Not Found"), null],
+    [res(200, "not json"), null],
+    [res(200, JSON.stringify({ v: 2, files: meta.files })), null],
+    [kinoError("timeout", "timed out"), null],
+  ]) {
+    const k = installKino({ routes: [(url) => (new URL(url).hostname === RAW && url.includes("/data/data-meta.json") ? answer : undefined)] });
+    const hf = await fresh("homeFeed.js");
+    const keys = await hf.feedKeys();
+    assert.deepEqual(keys === null ? null : [...keys].sort(), want);
+    assert.equal(k.requests.length, 1, "one request");
+    assert.equal(k.requests[0].init.timeoutMs, 2500);
+  }
+});
