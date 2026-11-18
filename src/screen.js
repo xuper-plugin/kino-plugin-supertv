@@ -108,25 +108,86 @@ function randomizeRows(rails, seed) {
 }
 
 // ---- Feed pre-armado + snapshot en dispositivo ----
-// The snapshot: every tab of the server in ONE entry (`homeSnap:v2:<serverKey>`), so a feed costs one storage rewrite instead
-// of one per tab. Each tab is trimmed (fewer cards per rail, then fewer rails) to SNAP_TAB_MAX and the whole to SNAP_MAX, in
-// Kino's measure of its store (store.js jsonLen), inside the 40 KB homeSnap class (another server's snapshot is evicted).
+// The snapshot: every tab of the server in ONE entry (`homeSnap:v3:<serverKey>`), so a feed costs one storage rewrite instead
+// of one per tab. Kino's measure of its store (store.js jsonLen) counts every `"` and `/` twice, so the cards are packed: a
+// rail is { c: catId, t: title, p: the start its logos share, i: cards } and a card [ref, title, the rest of its logo] (its
+// id is "live-" + the ref's stream id and its kind "live"); a card that is not like that keeps its object form, and a rail
+// whose id is not "lcat-" + catId keeps its id. A real feed tab (enriched refs, logo URLs of 64-75 characters) comes to about
+// 90 B a card instead of 190-250. Each tab is cut to its share: SNAP_TAB_MAX at most, and never more than an even split of
+// what is left of SNAP_MAX, so every tab fits whatever the others take, inside the 40 KB homeSnap class (another server's
+// snapshot is evicted). The cut takes fewer cards per rail, then fewer rails, then below 0.4.1's floor (6 x 6) four cards,
+// then no logos: a tab with rows is never left out (D-S1, 2026-11-18: a 7.5 KB cap at 6 x 6 kept only the Radio tab).
 // A snapshot written by 0.4.1 (`homeSnap:v1:<serverKey>:<tab>`, one per tab) is still read until the first feed replaces it.
-const SNAP_V = 2;
-const SNAP_TAB_MAX = 7.5 * 1024;
+const SNAP_V = 3;
+const SNAP_TAB_MAX = 9 * 1024;
 const SNAP_MAX = 36 * 1024;
-const slimCard = (c) => ({ id: c.id, ref: c.ref, title: c.title, ...(c.kind ? { kind: c.kind } : {}), ...(c.poster ? { poster: c.poster } : {}) });
+const SNAP_TAB_OVERHEAD = 16; // `"deportes":` and its comma, quotes escaped
+const SNAP_STEPS = [
+  ...[Infinity, 10, 8, 6].flatMap((rails) => [10, 8, 6].map((per) => [rails, per, true])),
+  [6, 4, true], [4, 4, true], [6, 4, false], [4, 3, false],
+];
+const SNAP_ID = /^live:(\d+)(?:~|$)/;
 const snapKey = () => "homeSnap:v" + SNAP_V + ":" + cat.serverKey();
 const oldSnapKey = (tab) => "homeSnap:v1:" + cat.serverKey() + ":" + tab;
-let snapMemo = null; // { key, tabs: { tab: rails as stored } } of the last snapshot read or written in this runtime
+let snapMemo = null; // { key, tabs: { tab: rails, unpacked } } of the last snapshot read or written in this runtime
 
-// [rails] slimmed and trimmed until the tab's JSON fits [max] bytes in Kino's measure; null when not even 6 x 5 fit.
+// The start every logo of [items] shares, up to its last "/" ("" for fewer than two logos).
+function logoBase(items) {
+  const logos = items.map((c) => c.poster).filter((p) => typeof p === "string" && p !== "");
+  if (logos.length < 2) return "";
+  let base = logos[0];
+  for (const p of logos) { let i = 0; while (i < base.length && i < p.length && base[i] === p[i]) i++; base = base.slice(0, i); }
+  return base.slice(0, base.lastIndexOf("/") + 1);
+}
+
+function packCard(c, base, logos) {
+  const m = typeof c.ref === "string" ? SNAP_ID.exec(c.ref) : null;
+  const poster = logos && typeof c.poster === "string" ? c.poster : "";
+  const plain = m && c.id === "live-" + m[1] && typeof c.title === "string" && (!c.kind || c.kind === "live") && c.adult !== true && (!poster || (poster.startsWith(base) && poster.length > base.length));
+  if (!plain) return { id: c.id, ref: c.ref, title: c.title, ...(c.kind ? { kind: c.kind } : {}), ...(poster ? { poster } : {}), ...(c.adult === true ? { adult: true } : {}) };
+  return poster ? [c.ref, c.title, poster.slice(base.length)] : [c.ref, c.title];
+}
+
+function packRail(r, per, logos) {
+  const items = (r.items || []).slice(0, per);
+  const base = logos ? logoBase(items) : "";
+  return { ...(r.id !== "lcat-" + r.catId ? { id: r.id } : {}), c: r.catId, t: r.title, ...(base ? { p: base } : {}), i: items.map((c) => packCard(c, base, logos)) };
+}
+
+// A stored rail as the screen draws it; null when nothing usable is left in it.
+function unpackRail(r) {
+  if (!r || typeof r !== "object" || !Array.isArray(r.i)) return null;
+  const base = typeof r.p === "string" ? r.p : "";
+  const items = [];
+  for (const x of r.i) {
+    if (Array.isArray(x)) {
+      const m = typeof x[0] === "string" ? SNAP_ID.exec(x[0]) : null;
+      if (m && typeof x[1] === "string") items.push({ id: "live-" + m[1], ref: x[0], title: x[1], kind: "live", ...(typeof x[2] === "string" && x[2] ? { poster: base + x[2] } : {}) });
+    } else if (x && typeof x.id === "string" && typeof x.ref === "string") items.push(x);
+  }
+  return items.length ? { id: typeof r.id === "string" ? r.id : "lcat-" + r.c, catId: r.c, title: typeof r.t === "string" ? r.t : "", items } : null;
+}
+
+function unpackTabs(tabs) {
+  const out = {};
+  for (const tab of Object.keys(tabs || {})) {
+    const rails = Array.isArray(tabs[tab]) ? tabs[tab].map(unpackRail).filter(Boolean) : [];
+    if (rails.length) out[tab] = rails;
+  }
+  return out;
+}
+
+// [rails] packed and cut by SNAP_STEPS until the tab fits [max] bytes in Kino's measure: { packed, bytes }, or null.
 function snapTab(rails, max) {
-  for (const maxRails of [rails.length, 10, 8, 6]) {
-    for (let per = 10; per >= 5; per -= 2) {
-      const slim = rails.slice(0, maxRails).map((r) => ({ id: r.id, catId: r.catId, title: r.title, items: (r.items || []).slice(0, per).map(slimCard) }));
-      if (jsonLen(JSON.stringify(slim)) <= max) return slim;
-    }
+  const tried = new Set();
+  for (const [maxRails, per, logos] of SNAP_STEPS) {
+    const n = Math.min(maxRails, rails.length);
+    const step = n + "," + per + "," + logos;
+    if (tried.has(step)) continue;
+    tried.add(step);
+    const packed = rails.slice(0, n).map((r) => packRail(r, per, logos));
+    const bytes = jsonLen(JSON.stringify(packed));
+    if (bytes <= max) return { packed, bytes };
   }
   return null;
 }
@@ -135,19 +196,17 @@ function writeSnap(tabsRails) {
   try {
     const tabs = {};
     let left = SNAP_MAX;
-    // The tab the person looks at first goes first: when the whole runs out of room, the last tabs are the ones left out.
-    const order = [storedTab() || TAB_IDS[0], ...TAB_IDS].filter((t, i, a) => a.indexOf(t) === i && tabsRails.has(t));
-    for (const tab of order) {
-      const rails = tabsRails.get(tab);
-      if (!rails || !rails.length) continue;
-      const slim = snapTab(rails, Math.min(SNAP_TAB_MAX, left - 64));
-      if (!slim) continue;
-      tabs[tab] = slim;
-      left -= jsonLen(JSON.stringify(slim)) + 16;
-    }
+    // The tab the person looks at first goes first; each tab gets at most an even split of what is left.
+    const order = [storedTab() || TAB_IDS[0], ...TAB_IDS].filter((t, i, a) => a.indexOf(t) === i && (tabsRails.get(t) || []).length);
+    order.forEach((tab, i) => {
+      const cut = snapTab(tabsRails.get(tab), Math.min(SNAP_TAB_MAX, Math.floor(left / (order.length - i)) - SNAP_TAB_OVERHEAD));
+      if (!cut) return;
+      tabs[tab] = cut.packed;
+      left -= cut.bytes + SNAP_TAB_OVERHEAD;
+    });
     if (!Object.keys(tabs).length) return;
     const key = snapKey();
-    if (put(key, JSON.stringify({ v: SNAP_V, at: Date.now(), tabs }))) snapMemo = { key, tabs };
+    if (put(key, JSON.stringify({ v: SNAP_V, at: Date.now(), tabs }))) snapMemo = { key, tabs: unpackTabs(tabs) };
   } catch (_) { /* almacenamiento lleno: sin snapshot */ }
 }
 
@@ -155,12 +214,12 @@ function writeSnap(tabsRails) {
 function storedSnapRails(tab) {
   const key = snapKey();
   if (!snapMemo || snapMemo.key !== key) {
-    let tabs = null;
+    let tabs = {};
     try {
       const o = JSON.parse(kino.storage.get(key) || "null");
-      if (o && o.v === SNAP_V && o.tabs && typeof o.tabs === "object") tabs = o.tabs;
-    } catch (_) { tabs = null; }
-    snapMemo = { key, tabs: tabs || {} };
+      if (o && o.v === SNAP_V && o.tabs && typeof o.tabs === "object") tabs = unpackTabs(o.tabs);
+    } catch (_) { tabs = {}; }
+    snapMemo = { key, tabs };
   }
   const rails = snapMemo.tabs[tab];
   if (Array.isArray(rails) && rails.length) return rails;

@@ -28,7 +28,8 @@ async function world({ snapshot = false, noFeed = false } = {}) {
     "health:v1": JSON.stringify({ ts: start - 7 * H, online: list.map((s) => s.url) }),
     "panels:v1": JSON.stringify({ v: 1, at: start - 2 * H, g: {}, t: {} }),
     ["cats:live:" + key]: JSON.stringify({ ts: start, l: [["77", "DEPORTES EVENTOS"], ...Array.from({ length: 12 }, (_, i) => [String(300 + i), "ES ▎CANALES " + i])] }),
-    ...(snapshot ? { ["homeSnap:v2:" + key]: JSON.stringify({ v: 2, at: start - H, tabs: { all: rails("SNAP ", 6, 6) } }) } : {}),
+    // The last session's snapshot, packed as screen.js stores it: a rail { c, t, i }, a card [ref, title].
+    ...(snapshot ? { ["homeSnap:v3:" + key]: JSON.stringify({ v: 3, at: start - H, tabs: { all: rails("SNAP ", 6, 6).map((r) => ({ c: r.catId, t: r.title, i: r.items.map((c) => [c.ref, c.title]) })) } }) } : {}),
   };
   const pending = new Set();
   const log = [];

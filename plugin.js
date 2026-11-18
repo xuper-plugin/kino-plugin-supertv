@@ -3357,19 +3357,74 @@ function shuffleSeeded(arr, seed) {
 function randomizeRows(rails, seed) {
   return shuffleSeeded(rails, seed).map((r, i) => r && Array.isArray(r.items) ? { ...r, items: shuffleSeeded(r.items, seed + (i + 1) * 1013904223 | 0) } : r);
 }
-var SNAP_V = 2;
-var SNAP_TAB_MAX = 7.5 * 1024;
+var SNAP_V = 3;
+var SNAP_TAB_MAX = 9 * 1024;
 var SNAP_MAX = 36 * 1024;
-var slimCard = (c) => ({ id: c.id, ref: c.ref, title: c.title, ...c.kind ? { kind: c.kind } : {}, ...c.poster ? { poster: c.poster } : {} });
+var SNAP_TAB_OVERHEAD = 16;
+var SNAP_STEPS = [
+  ...[Infinity, 10, 8, 6].flatMap((rails) => [10, 8, 6].map((per) => [rails, per, true])),
+  [6, 4, true],
+  [4, 4, true],
+  [6, 4, false],
+  [4, 3, false]
+];
+var SNAP_ID = /^live:(\d+)(?:~|$)/;
 var snapKey = () => "homeSnap:v" + SNAP_V + ":" + serverKey();
 var oldSnapKey = (tab) => "homeSnap:v1:" + serverKey() + ":" + tab;
 var snapMemo = null;
+function logoBase(items) {
+  const logos = items.map((c) => c.poster).filter((p) => typeof p === "string" && p !== "");
+  if (logos.length < 2) return "";
+  let base = logos[0];
+  for (const p of logos) {
+    let i = 0;
+    while (i < base.length && i < p.length && base[i] === p[i]) i++;
+    base = base.slice(0, i);
+  }
+  return base.slice(0, base.lastIndexOf("/") + 1);
+}
+function packCard(c, base, logos) {
+  const m = typeof c.ref === "string" ? SNAP_ID.exec(c.ref) : null;
+  const poster = logos && typeof c.poster === "string" ? c.poster : "";
+  const plain = m && c.id === "live-" + m[1] && typeof c.title === "string" && (!c.kind || c.kind === "live") && c.adult !== true && (!poster || poster.startsWith(base) && poster.length > base.length);
+  if (!plain) return { id: c.id, ref: c.ref, title: c.title, ...c.kind ? { kind: c.kind } : {}, ...poster ? { poster } : {}, ...c.adult === true ? { adult: true } : {} };
+  return poster ? [c.ref, c.title, poster.slice(base.length)] : [c.ref, c.title];
+}
+function packRail(r, per, logos) {
+  const items = (r.items || []).slice(0, per);
+  const base = logos ? logoBase(items) : "";
+  return { ...r.id !== "lcat-" + r.catId ? { id: r.id } : {}, c: r.catId, t: r.title, ...base ? { p: base } : {}, i: items.map((c) => packCard(c, base, logos)) };
+}
+function unpackRail(r) {
+  if (!r || typeof r !== "object" || !Array.isArray(r.i)) return null;
+  const base = typeof r.p === "string" ? r.p : "";
+  const items = [];
+  for (const x of r.i) {
+    if (Array.isArray(x)) {
+      const m = typeof x[0] === "string" ? SNAP_ID.exec(x[0]) : null;
+      if (m && typeof x[1] === "string") items.push({ id: "live-" + m[1], ref: x[0], title: x[1], kind: "live", ...typeof x[2] === "string" && x[2] ? { poster: base + x[2] } : {} });
+    } else if (x && typeof x.id === "string" && typeof x.ref === "string") items.push(x);
+  }
+  return items.length ? { id: typeof r.id === "string" ? r.id : "lcat-" + r.c, catId: r.c, title: typeof r.t === "string" ? r.t : "", items } : null;
+}
+function unpackTabs(tabs) {
+  const out = {};
+  for (const tab of Object.keys(tabs || {})) {
+    const rails = Array.isArray(tabs[tab]) ? tabs[tab].map(unpackRail).filter(Boolean) : [];
+    if (rails.length) out[tab] = rails;
+  }
+  return out;
+}
 function snapTab(rails, max) {
-  for (const maxRails of [rails.length, 10, 8, 6]) {
-    for (let per = 10; per >= 5; per -= 2) {
-      const slim2 = rails.slice(0, maxRails).map((r) => ({ id: r.id, catId: r.catId, title: r.title, items: (r.items || []).slice(0, per).map(slimCard) }));
-      if (jsonLen(JSON.stringify(slim2)) <= max) return slim2;
-    }
+  const tried = /* @__PURE__ */ new Set();
+  for (const [maxRails, per, logos] of SNAP_STEPS) {
+    const n = Math.min(maxRails, rails.length);
+    const step = n + "," + per + "," + logos;
+    if (tried.has(step)) continue;
+    tried.add(step);
+    const packed = rails.slice(0, n).map((r) => packRail(r, per, logos));
+    const bytes = jsonLen(JSON.stringify(packed));
+    if (bytes <= max) return { packed, bytes };
   }
   return null;
 }
@@ -3377,32 +3432,30 @@ function writeSnap(tabsRails) {
   try {
     const tabs = {};
     let left = SNAP_MAX;
-    const order = [storedTab() || TAB_IDS[0], ...TAB_IDS].filter((t, i, a) => a.indexOf(t) === i && tabsRails.has(t));
-    for (const tab of order) {
-      const rails = tabsRails.get(tab);
-      if (!rails || !rails.length) continue;
-      const slim2 = snapTab(rails, Math.min(SNAP_TAB_MAX, left - 64));
-      if (!slim2) continue;
-      tabs[tab] = slim2;
-      left -= jsonLen(JSON.stringify(slim2)) + 16;
-    }
+    const order = [storedTab() || TAB_IDS[0], ...TAB_IDS].filter((t, i, a) => a.indexOf(t) === i && (tabsRails.get(t) || []).length);
+    order.forEach((tab, i) => {
+      const cut = snapTab(tabsRails.get(tab), Math.min(SNAP_TAB_MAX, Math.floor(left / (order.length - i)) - SNAP_TAB_OVERHEAD));
+      if (!cut) return;
+      tabs[tab] = cut.packed;
+      left -= cut.bytes + SNAP_TAB_OVERHEAD;
+    });
     if (!Object.keys(tabs).length) return;
     const key = snapKey();
-    if (put(key, JSON.stringify({ v: SNAP_V, at: Date.now(), tabs }))) snapMemo = { key, tabs };
+    if (put(key, JSON.stringify({ v: SNAP_V, at: Date.now(), tabs }))) snapMemo = { key, tabs: unpackTabs(tabs) };
   } catch (_) {
   }
 }
 function storedSnapRails(tab) {
   const key = snapKey();
   if (!snapMemo || snapMemo.key !== key) {
-    let tabs = null;
+    let tabs = {};
     try {
       const o = JSON.parse(kino.storage.get(key) || "null");
-      if (o && o.v === SNAP_V && o.tabs && typeof o.tabs === "object") tabs = o.tabs;
+      if (o && o.v === SNAP_V && o.tabs && typeof o.tabs === "object") tabs = unpackTabs(o.tabs);
     } catch (_) {
-      tabs = null;
+      tabs = {};
     }
-    snapMemo = { key, tabs: tabs || {} };
+    snapMemo = { key, tabs };
   }
   const rails = snapMemo.tabs[tab];
   if (Array.isArray(rails) && rails.length) return rails;
