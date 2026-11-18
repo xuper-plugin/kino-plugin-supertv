@@ -484,7 +484,7 @@ var say = (key, lang, vars) => {
 };
 
 // src/version.js
-var PLUGIN_VERSION = "0.4.0";
+var PLUGIN_VERSION = "0.4.1";
 
 // src/panels.js
 var PANELS_KEY = "panels:v1";
