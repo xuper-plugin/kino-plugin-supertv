@@ -121,6 +121,31 @@ export async function fetchHomeFeed(serverKey, opts) {
   return (await loadFeed(serverKey, opts)).feed || null;
 }
 
+// data-meta.json on `data` (scripts/feed-set.mjs META): every path the Action published, with the `at` sealed in it
+// (builtAt), and no secret. The first run's race reads it once, alongside the server list, to try the accounts that have a
+// Home feed first: an account with none gives a new person a Home built from the panel, seconds later.
+const META_URL = REPO + "data/data-meta.json";
+const META_TIMEOUT_MS = 2500;
+const HOME_PATH = /^home\/([0-9a-z]+)(\.v2)?\.enc\.json$/;
+
+/** The server keys with a Home feed younger than the readers' limit (a Set), or null when the list is unavailable. Never throws. */
+export async function feedKeys() {
+  try {
+    const r = await kino.fetch(`${META_URL}?v=${Math.floor(Date.now() / 3600000)}`, { headers: { Accept: "application/json" }, timeoutMs: META_TIMEOUT_MS });
+    if (!r || !r.ok) return null;
+    const meta = JSON.parse(r.text());
+    if (!meta || meta.v !== 1 || !meta.files || typeof meta.files !== "object") return null;
+    const now = Date.now();
+    const keys = new Set();
+    for (const path of Object.keys(meta.files)) {
+      const m = HOME_PATH.exec(path);
+      const f = meta.files[path];
+      if (m && f && typeof f.builtAt === "number" && now - f.builtAt < MAX_AGE_MS) keys.add(m[1]);
+    }
+    return keys;
+  } catch (_) { return null; }
+}
+
 // One download per runtime and server for every reader (the screen's Home and Kino's native section, which asks on every
 // tab switch): a feed is kept FEED_MEMO_MS, the answer that there is none MISS_MEMO_MS, a network failure never.
 const FEED_MEMO_MS = 30 * 60 * 1000;

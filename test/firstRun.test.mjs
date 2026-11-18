@@ -24,12 +24,16 @@ const PANEL = (u) => u.hostname !== "vegetatvv2.duckdns.org" && u.hostname !== "
 
 // [accounts]: name -> { url, flag, b } in the service's order. How an account's live categories answer, [b]: a number (a
 // good list after that many ms; over the request's timeoutMs it times out instead), { dead: ms } (auth 0), "hang" (until its
-// timeout) or "down" (a network error after 200 ms). Every account has a feed on the data branch unless [noFeed].
-function world({ accounts, storage, noFeed = false, start = Date.UTC(2026, 10, 17, 12) }) {
+// timeout) or "down" (a network error after 200 ms). Every account has a feed on the data branch unless [noFeed], or only
+// the ones named in [feeds]; data-meta.json on `data` lists them and answers after [meta] ms ("hang": until its timeout,
+// 404: not there).
+function world({ accounts, storage, noFeed = false, feeds = null, meta = FEED_MS, start = Date.UTC(2026, 10, 17, 12) }) {
   const net = virtualNet({ start });
   Date.now = net.now;
   const names = Object.keys(accounts);
   const acc = Object.fromEntries(names.map((n, i) => [n, { username: "u" + i, password: "p" + i, ...accounts[n] }]));
+  const hasFeed = (n) => !noFeed && (!feeds || feeds.includes(n));
+  const nameOfKey = Object.fromEntries(names.map((n) => [keyOf(acc[n]), n]));
   const listText = names.map((n) => `${acc[n].url}/get.php?username=${acc[n].username}&password=${acc[n].password} [${acc[n].flag}]`).join("\n");
   const log = [];
   const pending = new Set();
@@ -50,6 +54,13 @@ function world({ accounts, storage, noFeed = false, start = Date.UTC(2026, 10, 1
     const u = new URL(url);
     const lim = (init && init.timeoutMs) || 15000;
     if (u.hostname === "vegetatvv2.duckdns.org") { log.push({ n: "boot", at: net.now() }); return track(u, net.request(BOOT_MS).then(() => res(200, { ok: true, servers_text: listText }))); }
+    if (u.hostname === "raw.githubusercontent.com" && u.pathname.endsWith("/data/data-meta.json")) {
+      log.push({ n: "meta", at: net.now(), timeoutMs: init && init.timeoutMs });
+      if (meta === "hang") return track(u, net.request(lim).then(() => kinoError("timeout", "timed out")));
+      if (meta === 404) return track(u, net.request(FEED_MS).then(() => res(404, "404: Not Found")));
+      const files = Object.fromEntries(names.filter(hasFeed).map((n) => [`home/${keyOf(acc[n])}.enc.json`, { builtAt: net.now() - 3600000 }]));
+      return track(u, net.request(meta).then(() => res(200, { v: 1, at: net.now(), maxAgeMs: 72 * 3600000, files })));
+    }
     if (u.hostname === "raw.githubusercontent.com") {
       const file = u.pathname.split("/").pop();
       const v2 = file.endsWith(".v2.enc.json");
@@ -57,7 +68,7 @@ function world({ accounts, storage, noFeed = false, start = Date.UTC(2026, 10, 1
       log.push({ n: "feed", at: net.now(), key, v2 });
       const feed = Buffer.from(JSON.stringify({ v: 1, at: net.now(), serverKey: key, tabs: { all: [{ id: "lcat-2956", catId: "2956", title: "ES DAZN", items: [{ id: "live-201583", ref: "live:201583~2956~es.dazn~es.hd.dazn.1", title: "DAZN 1 HD", kind: "live" }] }] } }));
       const body = JSON.stringify({ v: v2 ? 2 : 1, iv: "AAAA", data: (v2 ? gzipSync(feed) : feed).toString("base64") });
-      return track(u, net.request(FEED_MS).then(() => (noFeed ? res(404, "") : res(200, body))));
+      return track(u, net.request(FEED_MS).then(() => (hasFeed(nameOfKey[key]) ? res(200, body) : res(404, ""))));
     }
     const n = names.find((x) => new URL(acc[x].url).hostname === u.hostname && acc[x].username === param(url, "username"));
     if (!n) return undefined;
@@ -174,6 +185,68 @@ test("D1, the device list: the race replaces each failed account and picks the w
   const health = probes(w, n).map((e) => e.n);
   assert.ok(!health.includes("cap") && !health.includes("xiq") && health.includes("zee"), health.join(","));
   assert.equal(srvs(w).chosen, keyOfAcc(w, "nex"));
+});
+
+// ---- accounts with a Home feed first (data-meta.json) ----
+
+// A Spanish account that answers first but has no Home feed (line.krishkaz.com for Ultra HD on 2026-11-18), then three with one.
+const NO_FEED_FIRST = {
+  kri: { url: "https://kri.example", flag: "🇪🇸", b: 300 },
+  fv: { url: "https://fv.example", flag: "🇪🇸", b: 900 },
+  pp: { url: "https://pp.example", flag: "🇪🇸", b: 1000 },
+  nex: { url: "https://nex.example", flag: "🇲🇽", b: 1100 },
+};
+
+test("fresh install: data-meta.json, read alongside the server list, puts the accounts with a Home feed first", async () => {
+  const w = world({ accounts: NO_FEED_FIRST, feeds: ["fv", "pp", "nex"] });
+  const d = await driver(w);
+  const out = await d.run();
+  assert.equal(out.kind, "home");
+  assert.equal(out.ticks, 1);
+  const t = d.ticks[0];
+  const meta = w.log.filter((e) => e.n === "meta");
+  assert.equal(meta.length, 1, "read once");
+  assert.equal(meta[0].at, w.log.find((e) => e.n === "boot").at, "in parallel with the server list");
+  assert.equal(meta[0].timeoutMs, 2500);
+  const race = probes(w);
+  assert.equal(race[0].at - t.at, BOOT_MS, "the race starts once the list is in");
+  assert.deepEqual(race.map((e) => e.n), ["fv", "pp", "nex"], "the three with a feed; the faster one without never starts");
+  assert.equal(srvs(w).chosen, keyOfAcc(w, "fv"));
+  const feed = w.log.filter((e) => e.n === "feed");
+  assert.deepEqual(feed.map((e) => e.key), [keyOfAcc(w, "fv")], "its feed, found at the first request");
+});
+
+test("data-meta.json after the list: the race starts at once in today's order, and the accounts not yet asked are ranked again", async () => {
+  const accounts = {
+    d1: { url: "https://d1.example", flag: "🇪🇸", b: { dead: 400 } },
+    d2: { url: "https://d2.example", flag: "🇪🇸", b: { dead: 400 } },
+    d3: { url: "https://d3.example", flag: "🇪🇸", b: { dead: 400 } },
+    ...NO_FEED_FIRST,
+  };
+  const w = world({ accounts, feeds: ["fv", "pp", "nex"], meta: BOOT_MS + 200 });
+  const d = await driver(w);
+  const t = await d.tick();
+  const race = probes(w);
+  assert.equal(race[0].at - t.at, BOOT_MS, "not held for data-meta.json");
+  assert.deepEqual(race.map((e) => e.n), ["d1", "d2", "d3", "fv", "pp", "nex"], "after the dead three: the feed accounts, not kri");
+  assert.equal(srvs(w).chosen, keyOfAcc(w, "fv"));
+});
+
+test("data-meta.json hanging or missing never holds the race; a winner with no feed loads its Home as before", async () => {
+  for (const meta of ["hang", 404]) {
+    const w = world({ accounts: NO_FEED_FIRST, feeds: ["fv", "pp", "nex"], meta });
+    const d = await driver(w);
+    const t = await d.tick();
+    const race = probes(w);
+    assert.equal(race[0].at - t.at, BOOT_MS, String(meta));
+    assert.deepEqual(race.slice(0, 3).map((e) => e.n), ["kri", "fv", "pp"], "today's order");
+    assert.equal(srvs(w).chosen, keyOfAcc(w, "kri"), String(meta));
+    assert.ok(t.took <= 2500 + FEED_MS * 2, `the tick holds to data-meta.json's own 2.5 s at most (${t.took} ms)`);
+    // No feed for kri: the Home's live rows load in the next ticks, as before.
+    const n = w.log.length;
+    for (let i = 0; i < 3; i++) await d.tick();
+    assert.ok(w.log.slice(n).some((e) => e.n === "kri" && e.action === "get_live_streams"), String(meta));
+  }
 });
 
 test("a Spanish account still in flight wins over a faster foreign one; the foreign one wins only when it fails", async () => {

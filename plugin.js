@@ -2112,7 +2112,7 @@ var RACE_MIN_TRY_MS = 1500;
 var RACE_MS = 9e3;
 var HOST_DOWN = /* @__PURE__ */ new Set(["timeout", "network", "host_not_allowed"]);
 var NO_MORE = /* @__PURE__ */ new Set(["rate_limited", "invalid_request"]);
-function raceAccounts(cands, deadline) {
+function raceAccounts(cands, deadline, later) {
   return new Promise((resolve3) => {
     const queue = cands.slice();
     const busy = /* @__PURE__ */ new Set();
@@ -2124,6 +2124,10 @@ function raceAccounts(cands, deadline) {
         resolve3(v);
       }
     };
+    if (later) later.then((keys) => {
+      if (!done) queue.splice(0, queue.length, ...feedFirst(queue, keys));
+    }, () => {
+    });
     const settle = (c, data, e) => {
       flying--;
       if (c.es) flyingEs--;
@@ -2178,7 +2182,26 @@ function choose(srv, data) {
   rememberLiveCats(srv, data);
   return true;
 }
-async function autoPickServer({ until = Date.now() + 13500 } = {}) {
+function feedFirst(cands, keys) {
+  if (!(keys instanceof Set) || !keys.size) return cands;
+  const rank = (c) => (c.es ? 0 : 2) + (keys.has(keyOf(c.srv)) ? 0 : 1);
+  return cands.map((c, n) => ({ c, n, r: rank(c) })).sort((a, b) => a.r - b.r || a.n - b.n).map((x) => x.c);
+}
+async function autoPickServer({ until = Date.now() + 13500, feedKeys: feedKeys2 = null } = {}) {
+  const stored = migrate(readSrvs());
+  let feeds = null;
+  if (typeof feedKeys2 === "function" && !(stored && stored.chosen)) {
+    try {
+      feeds = Promise.resolve(feedKeys2());
+    } catch (_) {
+      feeds = null;
+    }
+  }
+  let keys = null;
+  if (feeds) feeds.then((k) => {
+    keys = k;
+  }, () => {
+  });
   try {
     const st = await loadServers(false, { timeoutMs: LIST_TIMEOUT_MS });
     if (st.chosen) {
@@ -2186,7 +2209,7 @@ async function autoPickServer({ until = Date.now() + 13500 } = {}) {
       return { ok: true, kept: true, host: hostOf(cur), label: labelOf2(cur) };
     }
     const cands = listItems(st).items.map((x) => ({ srv: st.list[x.i], es: x.es, host: hostnameOf2(st.list[x.i]) }));
-    const win = await raceAccounts(cands, Math.min(Date.now() + RACE_MS, until));
+    const win = await raceAccounts(feedFirst(cands, keys), Math.min(Date.now() + RACE_MS, until), keys ? null : feeds);
     if (!win || !choose(win.srv, win.data)) return { ok: false };
     return { ok: true, host: hostOf(win.srv), label: labelOf2(win.srv) };
   } catch (e) {
@@ -3192,6 +3215,27 @@ async function loadFeed(serverKey2, opts) {
     return { net: true };
   }
 }
+var META_URL = REPO + "data/data-meta.json";
+var META_TIMEOUT_MS = 2500;
+var HOME_PATH = /^home\/([0-9a-z]+)(\.v2)?\.enc\.json$/;
+async function feedKeys() {
+  try {
+    const r = await kino.fetch(`${META_URL}?v=${Math.floor(Date.now() / 36e5)}`, { headers: { Accept: "application/json" }, timeoutMs: META_TIMEOUT_MS });
+    if (!r || !r.ok) return null;
+    const meta = JSON.parse(r.text());
+    if (!meta || meta.v !== 1 || !meta.files || typeof meta.files !== "object") return null;
+    const now = Date.now();
+    const keys = /* @__PURE__ */ new Set();
+    for (const path of Object.keys(meta.files)) {
+      const m = HOME_PATH.exec(path);
+      const f = meta.files[path];
+      if (m && f && typeof f.builtAt === "number" && now - f.builtAt < MAX_AGE_MS) keys.add(m[1]);
+    }
+    return keys;
+  } catch (_) {
+    return null;
+  }
+}
 var FEED_MEMO_MS = 30 * 60 * 1e3;
 var MISS_MEMO_MS = 5 * 60 * 1e3;
 var feedMemo = null;
@@ -3487,7 +3531,7 @@ async function autoPick() {
   const until = Date.now() + FIRST_RUN_TICK_MS;
   let r = null;
   try {
-    r = await autoPickServer({ until: until - FEED_MIN_MS });
+    r = await autoPickServer({ until: until - FEED_MIN_MS, feedKeys });
   } catch (_) {
     r = null;
   }

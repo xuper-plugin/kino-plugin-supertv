@@ -463,15 +463,17 @@ const NO_MORE = new Set(["rate_limited", "invalid_request"]);
  * one answers a real list or [deadline]. Each request's timeout ends by the deadline. A host that timed out or could not be
  * reached is not asked again in this race. A Spanish answer wins at once; any other waits for the Spanish accounts still in
  * flight (Kino holds the call until they settle anyway) and wins only if none of them answers. A dead account is marked by
- * callServer and never wins. `{ srv, data }` or null; never rejects.
+ * callServer and never wins. [later]: a promise of the server keys with a Home feed that had not come when the race began;
+ * when it comes, the accounts not yet asked are ranked again (feedFirst). `{ srv, data }` or null; never rejects.
  */
-function raceAccounts(cands, deadline) {
+function raceAccounts(cands, deadline, later) {
   return new Promise((resolve) => {
     const queue = cands.slice();
     const busy = new Set();
     const gone = new Set();
     let flying = 0, flyingEs = 0, reserve = null, stop = false, done = false;
     const finish = (v) => { if (!done) { done = true; resolve(v); } };
+    if (later) later.then((keys) => { if (!done) queue.splice(0, queue.length, ...feedFirst(queue, keys)); }, () => {});
     const settle = (c, data, e) => {
       flying--; if (c.es) flyingEs--; busy.delete(c.host);
       if (done) return;
@@ -519,18 +521,35 @@ function choose(srv, data) {
   return true;
 }
 
+// [cands] (the race's ranking) with the accounts that have a Home feed ([keys]: their server keys) first within each group,
+// the Spanish one and then the rest, and otherwise in the same order. Without [keys] the ranking stays as it is.
+function feedFirst(cands, keys) {
+  if (!(keys instanceof Set) || !keys.size) return cands;
+  const rank = (c) => (c.es ? 0 : 2) + (keys.has(keyOf(c.srv)) ? 0 : 1);
+  return cands.map((c, n) => ({ c, n, r: rank(c) })).sort((a, b) => a.r - b.r || a.n - b.n).map((x) => x.c);
+}
+
 /**
  * First run, before any Home: the rolling race (raceAccounts) over every account of the picker's ranking (Spanish first;
  * never a dead or blocked one), within RACE_MS of the list and never past [until]. The winner becomes the active and chosen
  * server. A server already chosen is never raced or replaced. Never throws. `{ ok, host, label, kept? }`; ok false when no
  * account answered well in time (the screen then runs the health check with its own automatic pick).
+ * [feedKeys]: () => a promise of the server keys with a Home feed, or null (homeFeed.feedKeys). It is asked with the server
+ * list, and the race tries the accounts with a feed first; the race never waits for it: when the list comes first the race
+ * begins in today's order and ranks the rest again once the keys come, and when they never come (or the winner has no
+ * feed) the Home loads as before.
  */
-export async function autoPickServer({ until = Date.now() + 13500 } = {}) {
+export async function autoPickServer({ until = Date.now() + 13500, feedKeys = null } = {}) {
+  const stored = migrate(readSrvs());
+  let feeds = null;
+  if (typeof feedKeys === "function" && !(stored && stored.chosen)) { try { feeds = Promise.resolve(feedKeys()); } catch (_) { feeds = null; } }
+  let keys = null;
+  if (feeds) feeds.then((k) => { keys = k; }, () => {});
   try {
     const st = await loadServers(false, { timeoutMs: LIST_TIMEOUT_MS });
     if (st.chosen) { const cur = st.list[st.idx]; return { ok: true, kept: true, host: hostOf(cur), label: labelOf(cur) }; }
     const cands = listItems(st).items.map((x) => ({ srv: st.list[x.i], es: x.es, host: hostnameOf(st.list[x.i]) }));
-    const win = await raceAccounts(cands, Math.min(Date.now() + RACE_MS, until));
+    const win = await raceAccounts(feedFirst(cands, keys), Math.min(Date.now() + RACE_MS, until), keys ? null : feeds);
     if (!win || !choose(win.srv, win.data)) return { ok: false };
     return { ok: true, host: hostOf(win.srv), label: labelOf(win.srv) };
   } catch (e) {

@@ -5,7 +5,7 @@ import * as cat from "./catalog.js";
 import { say, twin } from "./i18n.js";
 import { put, jsonLen } from "./store.js";
 import { TAB_IDS, browseView, searchView, liveView, settingsView, verifyingView, firstPickView, cardOf } from "./screenView.js";
-import { homeFeed, upgradeBareRefs } from "./homeFeed.js";
+import { homeFeed, upgradeBareRefs, feedKeys } from "./homeFeed.js";
 import { PLUGIN_VERSION } from "./version.js";
 import { cleanCards, cleanRails } from "./channelTitle.js";
 
@@ -255,15 +255,16 @@ const FIRST_RUN_TICK_MS = 16000;
 const FEED_MIN_MS = 2500;
 
 // First run: the server is chosen automatically and remembered, so the person never has to pick one. The accounts of the
-// picker's ranking (Spanish first, never a dead or blocked one) race three at a time, 2.5 s each, the next starting as soon as
-// one fails, and the first that answers well is chosen (cat.autoPickServer). The feed then loads in this same tick, so the
-// Home paints right after it, and the health check runs once the Home shows (unitsFor). When no account answered in time
-// the next tick runs rescue(). The 🌐 button in the header still changes the server at any time.
+// picker's ranking (Spanish first, never a dead or blocked one; within each group the ones the Action publishes a Home feed
+// for first, read from data-meta.json alongside the server list) race three at a time, 2.5 s each, the next starting as
+// soon as one fails, and the first that answers well is chosen (cat.autoPickServer). The feed then loads in this same tick,
+// so the Home paints right after it, and the health check runs once the Home shows (unitsFor). When no account answered in
+// time the next tick runs rescue(). The 🌐 button in the header still changes the server at any time.
 async function autoPick() {
   autoPickTried = true;
   const until = Date.now() + FIRST_RUN_TICK_MS;
   let r = null;
-  try { r = await cat.autoPickServer({ until: until - FEED_MIN_MS }); } catch (_) { r = null; }
+  try { r = await cat.autoPickServer({ until: until - FEED_MIN_MS, feedKeys }); } catch (_) { r = null; }
   if (r && r.ok) await picked(until);
 }
 
