@@ -237,14 +237,15 @@ test("refs are identical for every account of a panel (a favourite does not chur
   assert.deepEqual(a, b);
 });
 
-test("first run: the auto-pick races the top three at once and never chooses a dead account; a lost flag heals", async () => {
+test("first run: the auto-pick races the ranking three at a time and never chooses a dead account; a lost flag heals", async () => {
   const w = world();
   const screen = await fresh("screen.js");
   let state = {};
   const tick = async () => { const r = await screen.screenEvent({ name: "tick", state, lang: "es" }); state = { ...state, ...(r && r.state) }; };
   await tick();
-  // The dead https account sorts first and answers first: it is marked, never chosen; no health check before the Home.
-  assert.deepEqual(w.log.filter((e) => e.action).map((e) => e.n + " " + e.action), ["dead get_live_categories", "a1 get_live_categories", "a2 get_live_categories"]);
+  // The dead https account sorts first and answers first: it is marked, never chosen, and the next account (c) takes its
+  // place at once; no health check before the Home.
+  assert.deepEqual(w.log.filter((e) => e.action).map((e) => e.n + " " + e.action), ["dead get_live_categories", "a1 get_live_categories", "a2 get_live_categories", "c get_live_categories"]);
   assert.equal(activeName(w), "a1");
   assert.equal(srvs(w).chosen, keyOf(srvOf("a1")));
   assert.ok(isDead(srvOf("dead"), T));

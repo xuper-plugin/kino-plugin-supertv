@@ -27,6 +27,7 @@ let found = null;             // búsqueda de canales: { q, items, partial }
 let pickServers = null;       // lista para el selector de servidor (respaldo si el auto-elegido no responde)
 let cacheKey = null;
 let autoPickTried = false;    // primera instalación: ya se intentó elegir servidor automáticamente (sin que la persona elija)
+let rescueTried = false;      // first run, the race found no account: the health check with its automatic pick ran
 let pickedNow = false;        // this runtime's first-run auto-pick chose the server: the health check waits for the Home
 const homeFeedData = new Map(); // tab -> [rails] del feed pre-armado (si se bajó): Home al instante, sin recorrer el IPTV
 let homeFeedTried = false;      // ya se intentó el feed (haya salido o no)
@@ -148,24 +149,39 @@ function readSnap(tab) {
   } catch (_) { return null; }
 }
 
-// The auto-pick, then the feed, inside the one screen call of the first tick (Kino allows a call 20 s).
-const AUTOPICK_BUDGET_MS = 16000;
+// A first-run unit and the feed after it share one screen call: 16 s of the 20 s Kino allows, 2.5 s of them kept for the feed.
+const FIRST_RUN_TICK_MS = 16000;
 const FEED_MIN_MS = 2500;
 
-// First run: the server is chosen automatically and remembered, so the person never has to pick one. The top accounts of
-// the picker's ranking (Spanish first, never a dead or blocked one) race in parallel, 4 s each, and the first that answers
-// well is chosen (cat.autoPickServer). The feed then loads in this same tick, so the Home paints right after it, and the
-// health check runs once the Home shows (unitsFor). When none answers (no internet, say) nothing is chosen: the health
-// check and the manual picker follow. The 🌐 button in the header still changes the server at any time.
+// First run: the server is chosen automatically and remembered, so the person never has to pick one. The accounts of the
+// picker's ranking (Spanish first, never a dead or blocked one) race three at a time, 4 s each, the next starting as soon as
+// one fails, and the first that answers well is chosen (cat.autoPickServer). The feed then loads in this same tick, so the
+// Home paints right after it, and the health check runs once the Home shows (unitsFor). When no account answered in time
+// the next tick runs rescue(). The 🌐 button in the header still changes the server at any time.
 async function autoPick() {
   autoPickTried = true;
-  const until = Date.now() + AUTOPICK_BUDGET_MS;
+  const until = Date.now() + FIRST_RUN_TICK_MS;
   let r = null;
-  try { r = await cat.autoPickServer({ until }); } catch (_) { r = null; }
-  if (!r || !r.ok) return;
+  try { r = await cat.autoPickServer({ until: until - FEED_MIN_MS }); } catch (_) { r = null; }
+  if (r && r.ok) await picked(!r.kept, until);
+}
+
+// The race found no account (every one it reached failed, or the slow ones needed more than 4 s): the health check (10 s per
+// account, all of them) and its automatic pick of the best-ranked account that answered run in ONE tick, the feed after it
+// when time is left, so Kino's doubled wait after a slow tick is paid once. Only when no account answered does the manual
+// picker show.
+async function rescue() {
+  rescueTried = true;
+  const until = Date.now() + FIRST_RUN_TICK_MS;
+  try { await cat.healthCheck({ until: until - FEED_MIN_MS, pick: true }); } catch (_) { /* nothing chosen: the picker */ }
+  if (cat.hasChosenServer()) await picked(true, until);
+}
+
+// A server was chosen for the person ([now]: in this runtime): remembered, then its feed while the tick has time for it.
+async function picked(now, until) {
   markServerChosen();
   cacheKey = cat.serverKey();
-  pickedNow = !r.kept;
+  pickedNow = now;
   if (until - Date.now() >= FEED_MIN_MS) await loadHomeFeed({ until });
 }
 
@@ -256,14 +272,14 @@ const tabOf = (state, route) => {
   return TAB_IDS.includes(state.tab) ? state.tab : TAB_IDS.includes(a.tab) ? a.tab : storedTab() || TAB_IDS[0];
 };
 
-// Unidades que faltan por cargar. Sin servidor elegido aún: solo salud y la lista para el selector inicial (no se carga el Home
-// hasta que la persona elija, para no entrar con un servidor al azar). Ya elegido: salud, categorías y las filas del tab.
+// Unidades que faltan por cargar. Sin servidor elegido aún: la elección automática (carrera, luego rescate) y, si ninguna
+// encontró servidor, la lista para el selector inicial. Ya elegido: salud, categorías y las filas del tab.
 // Primero el feed pre-armado (una sola descarga): si está, el Home sale al instante y NO se recorre el IPTV. Si el feed
 // tiene el tab, no hace falta nada más; si falta/está viejo/falló, se cae a la carga en vivo (categorías + filas del tab).
 function unitsFor(tab) {
-  // First run: the auto-pick races the top accounts and loads the feed in the same tick. When no account answered, the
-  // health check runs and the manual picker shows the servers that answer.
-  if (!serverChosen()) return autoPickTried ? ["health", "pick"] : ["autopick"];
+  // First run: the auto-pick races the accounts and loads the feed in the same tick. When no account answered, the rescue
+  // (health check + automatic pick + feed) runs in the next one; only when that finds none does the manual picker show.
+  if (!serverChosen()) return autoPickTried ? ["rescue", "pick"] : ["autopick"];
   let base;
   // Right after the first-run auto-pick (its account just answered) the health check waits until the Home has content.
   if (pickedNow) base = homeFeedData.has(tab) ? ["hfeed", "health"] : ["hfeed", "cats", "tab:" + tab, "health"];
@@ -277,6 +293,7 @@ function unitsFor(tab) {
 
 function isDone(unit) {
   if (unit === "autopick") return autoPickTried;
+  if (unit === "rescue") return rescueTried;
   if (unit === "events") return eventsTried;
   if (unit === "hfeed") return homeFeedTried;
   if (unit === "cats") return liveCatsAll !== null;
@@ -293,6 +310,7 @@ function pendingUnit(state, tab) {
 
 async function runUnit(unit) {
   if (unit === "autopick") { await autoPick(); return; }
+  if (unit === "rescue") { await rescue(); return; }
   if (unit === "events") { await loadEvents(); return; }
   if (unit === "hfeed") { await loadHomeFeed(); return; }
   if (unit === "cats") { liveCatsAll = await cat.liveCategories(); return; }
@@ -304,11 +322,12 @@ async function runUnit(unit) {
 
 function mainView(ctx) {
   const state = ctx.state || {};
-  // Primera instalación: mientras se auto-elige el servidor, un breve "Verificando…". Si el autopick no encontró ninguno, se
-  // muestra el selector manual como respaldo (ahí sí la persona elige). El 🌐 del header permite cambiarlo en cualquier momento.
+  // Primera instalación: mientras se auto-elige el servidor, un breve "Verificando…". Si ni la carrera ni el rescate (chequeo de
+  // salud con elección automática) encontraron uno, se muestra el selector manual como respaldo (ahí sí la persona elige).
+  // El 🌐 del header permite cambiarlo en cualquier momento.
   if (!serverChosen()) {
     if (!autoPickTried) return verifyingView({ device: ctx.device });
-    if (!cat.healthReady() && !(state.failed && state.failed.health)) return verifyingView({ device: ctx.device });
+    if (!rescueTried && !(state.failed && state.failed.rescue)) return verifyingView({ device: ctx.device });
     return firstPickView({ servers: pickServers, failed: !!(state.failed && state.failed.pick), device: ctx.device });
   }
   const tab = tabOf(state, ctx.route);

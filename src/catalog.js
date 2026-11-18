@@ -427,49 +427,96 @@ function listItems(st) {
 }
 
 // ---- first-run auto-pick ---------------------------------------------------------------------------------------------
-const AUTOPICK_RACE = 3;          // accounts raced at once: under Kino's 4 requests per host and 6 per plugin
-const AUTOPICK_TIMEOUT_MS = 4000;
+const RACE_LANES = 3;          // accounts asked at once, one per panel host (Kino runs 6 of a plugin's requests, 4 per host)
+const RACE_TRY_MS = 4000;      // each account's timeout
+const RACE_MIN_TRY_MS = 1500;  // no account starts with less time than this left before the race's deadline
+// The race's own deadline, counted from when the server list is in hand. The first-run tick keeps to 16 s of Kino's 20 s
+// call: the list (about 0.5-2.5 s, 4 s a request at most) + this race + the feed that loads right after the winner (the
+// screen keeps 2.5 s for it, the [until] it passes). Every account's timeout ends by this deadline, so Kino, which holds a
+// call until each request it sent has settled, never holds the tick past it. 9 s is two rounds of 4 s timeouts on each of
+// the three lanes, or some 25 dead accounts at about 1 s each.
+const RACE_MS = 9000;
 
-// The value of the first of [jobs] to fulfil, or null once every one failed. The others run on (Kino answers a call only
-// after its requests settle) and their values are dropped.
-function firstFulfilled(jobs) {
+// A failure that says the panel HOST is out of reach (its other accounts would wait the same), not the account.
+const HOST_DOWN = new Set(["timeout", "network", "host_not_allowed"]);
+// Kino refused the request itself (the call's or the site's request budget): no more accounts start.
+const NO_MORE = new Set(["rate_limited", "invalid_request"]);
+
+/**
+ * The rolling race over [cands] (ranked, Spanish first: `{ srv, es, host }`): up to RACE_LANES accounts are asked for their
+ * live categories at once, never two of one host, and as soon as one fails the next in rank whose host is free starts, until
+ * one answers a real list or [deadline]. Each request's timeout ends by the deadline. A host that timed out or could not be
+ * reached is not asked again in this race. A Spanish answer wins at once; any other waits for the Spanish accounts still in
+ * flight (Kino holds the call until they settle anyway) and wins only if none of them answers. A dead account is marked by
+ * callServer and never wins. `{ srv, data }` or null; never rejects.
+ */
+function raceAccounts(cands, deadline) {
   return new Promise((resolve) => {
-    let pending = jobs.length;
-    if (!pending) { resolve(null); return; }
-    for (const j of jobs) Promise.resolve(j).then(resolve, () => { if (--pending === 0) resolve(null); });
+    const queue = cands.slice();
+    const busy = new Set();
+    const gone = new Set();
+    let flying = 0, flyingEs = 0, reserve = null, stop = false, done = false;
+    const finish = (v) => { if (!done) { done = true; resolve(v); } };
+    const settle = (c, data, e) => {
+      flying--; if (c.es) flyingEs--; busy.delete(c.host);
+      if (done) return;
+      if (data) {
+        if (c.es) { finish({ srv: c.srv, data }); return; }
+        if (!reserve) reserve = { srv: c.srv, data };
+      } else {
+        lastErr = errText(e);
+        const code = e && e.code;
+        if (HOST_DOWN.has(code)) gone.add(c.host);
+        if (NO_MORE.has(code)) stop = true;
+      }
+      pump();
+    };
+    const start = (c, timeoutMs) => {
+      flying++; if (c.es) flyingEs++; busy.add(c.host);
+      callServer(c.srv, PROBE, {}, { timeoutMs }).then(
+        (data) => (Array.isArray(data) && data.length ? settle(c, data, null) : settle(c, null, new Error("respuesta inválida"))),
+        (e) => settle(c, null, e));
+    };
+    function pump() {
+      while (!stop && !reserve && flying < RACE_LANES) {
+        const left = deadline - Date.now();
+        if (left < RACE_MIN_TRY_MS) break;
+        const at = queue.findIndex((c) => !busy.has(c.host) && !gone.has(c.host));
+        if (at < 0) break;
+        start(queue.splice(at, 1)[0], Math.min(RACE_TRY_MS, left));
+      }
+      if (reserve ? !flyingEs : !flying) finish(reserve);
+    }
+    pump();
   });
 }
 
+// Makes [srv] the active and chosen server with the live categories it just answered (the Home needs no second request).
+// false when a server was chosen meanwhile (the person's choice stays) or [srv] left the list.
+function choose(srv, data) {
+  const cur = readSrvs();
+  const k = keyOf(srv);
+  const i = cur && Array.isArray(cur.list) ? cur.list.findIndex((s) => keyOf(s) === k) : -1;
+  if (i < 0 || cur.chosen) return false;
+  cur.idx = i; cur.ok = true; cur.okAt = Date.now(); cur.chosen = k;
+  writeSrvs(cur);
+  rememberLiveCats(srv, data);
+  return true;
+}
+
 /**
- * First run, before any Home: the top AUTOPICK_RACE accounts of the picker's ranking (Spanish first; never a dead or blocked
- * one) are asked for their live categories at once, AUTOPICK_TIMEOUT_MS each (less when [until] is nearer), and the first
- * whose answer is a real list becomes the active and chosen server, its categories kept (the Home needs no second request).
- * An account that answers dead or empty never wins. A server already chosen is never replaced. Never throws.
- * `{ ok, host, label, kept? }`; ok false when no account answered well in time.
+ * First run, before any Home: the rolling race (raceAccounts) over every account of the picker's ranking (Spanish first;
+ * never a dead or blocked one), within RACE_MS of the list and never past [until]. The winner becomes the active and chosen
+ * server. A server already chosen is never raced or replaced. Never throws. `{ ok, host, label, kept? }`; ok false when no
+ * account answered well in time (the screen then runs the health check with its own automatic pick).
  */
-export async function autoPickServer({ until = Date.now() + 16000 } = {}) {
+export async function autoPickServer({ until = Date.now() + 13500 } = {}) {
   try {
     const st = await loadServers(false, { timeoutMs: LIST_TIMEOUT_MS });
     if (st.chosen) { const cur = st.list[st.idx]; return { ok: true, kept: true, host: hostOf(cur), label: labelOf(cur) }; }
-    const { items } = listItems(st);
-    const order = [...items.filter((x) => x.es), ...items.filter((x) => !x.es)].slice(0, AUTOPICK_RACE);
-    const left = until - Date.now() - 500;
-    if (!order.length || left < 1000) return { ok: false };
-    const timeoutMs = Math.min(AUTOPICK_TIMEOUT_MS, left);
-    const win = await firstFulfilled(order.map(async (x) => {
-      const srv = st.list[x.i];
-      const data = await callServer(srv, PROBE, {}, { timeoutMs });
-      if (!Array.isArray(data) || !data.length) throw new Error("respuesta inválida");
-      return { srv, data };
-    }));
-    if (!win) return { ok: false };
-    const cur = readSrvs() || st;
-    const k = keyOf(win.srv);
-    const i = Array.isArray(cur.list) ? cur.list.findIndex((s) => keyOf(s) === k) : -1;
-    if (i < 0 || cur.chosen) return { ok: false };
-    cur.idx = i; cur.ok = true; cur.okAt = Date.now(); cur.chosen = k;
-    writeSrvs(cur);
-    rememberLiveCats(win.srv, win.data);
+    const cands = listItems(st).items.map((x) => ({ srv: st.list[x.i], es: x.es, host: hostnameOf(st.list[x.i]) }));
+    const win = await raceAccounts(cands, Math.min(Date.now() + RACE_MS, until));
+    if (!win || !choose(win.srv, win.data)) return { ok: false };
     return { ok: true, host: hostOf(win.srv), label: labelOf(win.srv) };
   } catch (e) {
     lastErr = errText(e);
@@ -529,15 +576,16 @@ async function pool(list, limit, fn) {
 }
 
 // Probes the servers 6 at a time (never a dead or blocked account: zero requests), the active and the chosen one first, within
-// HEALTH_DEADLINE_MS, and stores the URLs of those that answer; a server the deadline left unprobed is stored with them (not
-// known down: the picker keeps offering it), never as down. With the same answers it groups the servers into panels (0 extra
-// requests). When the active server is down it jumps to one that answered: same panel, then same country, then by priority.
-// The jump never touches `chosen` (backHome returns there). Runs BEFORE the Home ("Verificando servidores…" screen). One run
-// at a time; never throws.
-export async function healthCheck() {
+// HEALTH_DEADLINE_MS (or [until], when sooner), and stores the URLs of those that answer; a server the deadline left unprobed is
+// stored with them (not known down: the picker keeps offering it), never as down. With the same answers it groups the servers
+// into panels (0 extra requests). [pick] (a first run whose race found no account): the probes go in the picker's ranking
+// and, with no server chosen yet, the best-ranked account that answered becomes the active and chosen one, with no further
+// request. Otherwise, when the active server is down it jumps to one that answered: same panel, then same country, then by
+// priority; the jump never touches `chosen` (backHome returns there). One run at a time; never throws.
+export async function healthCheck({ until: limit = Infinity, pick = false } = {}) {
   if (healthRunning) return 0;
   healthRunning = true;
-  const until = Date.now() + HEALTH_DEADLINE_MS;
+  const until = Math.min(Date.now() + HEALTH_DEADLINE_MS, limit);
   try {
     const st = await loadServers(false, { timeoutMs: LIST_TIMEOUT_MS });
     const list = st.list || [];
@@ -545,7 +593,10 @@ export async function healthCheck() {
     const answered = new Set();
     const unprobed = new Set();
     const first = new Set([keyOf(list[st.idx]), st.chosen].filter(Boolean));
-    const order = [...list.filter((s) => first.has(keyOf(s))), ...list.filter((s) => !first.has(keyOf(s)))];
+    const rank = new Map(list.map((s, i) => [s, priorityOf(s) * 1000 + i]));
+    const order = pick ? list.slice().sort((a, b) => rank.get(a) - rank.get(b))
+      : [...list.filter((s) => first.has(keyOf(s))), ...list.filter((s) => !first.has(keyOf(s)))];
+    let best = null; // [pick]: the best-ranked account that answered, with its categories
     await pool(order, HEALTH_PARALLEL, async (s) => {
       if (!usable(s)) return;
       const left = until - Date.now();
@@ -554,6 +605,7 @@ export async function healthCheck() {
         const data = await callServer(s, PROBE, {}, { timeoutMs: Math.min(HEALTH_TIMEOUT_MS, left - 500) });
         sets.set(keyOf(s), pairHashes(data));
         answered.add(s.url);
+        if (pick && Array.isArray(data) && data.length && (!best || rank.get(s) < rank.get(best.s))) best = { s, data };
       } catch (_) { /* down */ }
     });
     const online = list.filter((s) => answered.has(s.url)).map((s) => s.url);
@@ -561,6 +613,7 @@ export async function healthCheck() {
     put(HEALTH_KEY, JSON.stringify({ ts: now, online: list.filter((s) => answered.has(s.url) || unprobed.has(s.url)).map((s) => s.url) }));
     const map = groupPanels(sets, readPanels(), now);
     writePanels(map);
+    if (best) choose(best.s, best.data);
     const fresh = readSrvs() || st;
     const cur = fresh.list && fresh.list[fresh.idx];
     if (cur && online.length && !online.includes(cur.url)) {

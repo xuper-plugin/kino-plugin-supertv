@@ -2071,49 +2071,88 @@ function listItems(st) {
   items.sort((a, b) => srvPriority(a) - srvPriority(b) || a.i - b.i);
   return { items, checked: !!h };
 }
-var AUTOPICK_RACE = 3;
-var AUTOPICK_TIMEOUT_MS = 4e3;
-function firstFulfilled(jobs) {
+var RACE_LANES = 3;
+var RACE_TRY_MS = 4e3;
+var RACE_MIN_TRY_MS = 1500;
+var RACE_MS = 9e3;
+var HOST_DOWN = /* @__PURE__ */ new Set(["timeout", "network", "host_not_allowed"]);
+var NO_MORE = /* @__PURE__ */ new Set(["rate_limited", "invalid_request"]);
+function raceAccounts(cands, deadline) {
   return new Promise((resolve2) => {
-    let pending = jobs.length;
-    if (!pending) {
-      resolve2(null);
-      return;
+    const queue = cands.slice();
+    const busy = /* @__PURE__ */ new Set();
+    const gone = /* @__PURE__ */ new Set();
+    let flying = 0, flyingEs = 0, reserve = null, stop = false, done = false;
+    const finish = (v) => {
+      if (!done) {
+        done = true;
+        resolve2(v);
+      }
+    };
+    const settle = (c, data, e) => {
+      flying--;
+      if (c.es) flyingEs--;
+      busy.delete(c.host);
+      if (done) return;
+      if (data) {
+        if (c.es) {
+          finish({ srv: c.srv, data });
+          return;
+        }
+        if (!reserve) reserve = { srv: c.srv, data };
+      } else {
+        lastErr = errText(e);
+        const code = e && e.code;
+        if (HOST_DOWN.has(code)) gone.add(c.host);
+        if (NO_MORE.has(code)) stop = true;
+      }
+      pump();
+    };
+    const start = (c, timeoutMs) => {
+      flying++;
+      if (c.es) flyingEs++;
+      busy.add(c.host);
+      callServer(c.srv, PROBE, {}, { timeoutMs }).then(
+        (data) => Array.isArray(data) && data.length ? settle(c, data, null) : settle(c, null, new Error("respuesta inv\xE1lida")),
+        (e) => settle(c, null, e)
+      );
+    };
+    function pump() {
+      while (!stop && !reserve && flying < RACE_LANES) {
+        const left = deadline - Date.now();
+        if (left < RACE_MIN_TRY_MS) break;
+        const at = queue.findIndex((c) => !busy.has(c.host) && !gone.has(c.host));
+        if (at < 0) break;
+        start(queue.splice(at, 1)[0], Math.min(RACE_TRY_MS, left));
+      }
+      if (reserve ? !flyingEs : !flying) finish(reserve);
     }
-    for (const j of jobs) Promise.resolve(j).then(resolve2, () => {
-      if (--pending === 0) resolve2(null);
-    });
+    pump();
   });
 }
-async function autoPickServer({ until = Date.now() + 16e3 } = {}) {
+function choose(srv, data) {
+  const cur = readSrvs();
+  const k = keyOf(srv);
+  const i = cur && Array.isArray(cur.list) ? cur.list.findIndex((s) => keyOf(s) === k) : -1;
+  if (i < 0 || cur.chosen) return false;
+  cur.idx = i;
+  cur.ok = true;
+  cur.okAt = Date.now();
+  cur.chosen = k;
+  writeSrvs(cur);
+  rememberLiveCats(srv, data);
+  return true;
+}
+async function autoPickServer({ until = Date.now() + 13500 } = {}) {
   try {
     const st = await loadServers(false, { timeoutMs: LIST_TIMEOUT_MS });
     if (st.chosen) {
-      const cur2 = st.list[st.idx];
-      return { ok: true, kept: true, host: hostOf(cur2), label: labelOf2(cur2) };
+      const cur = st.list[st.idx];
+      return { ok: true, kept: true, host: hostOf(cur), label: labelOf2(cur) };
     }
-    const { items } = listItems(st);
-    const order = [...items.filter((x) => x.es), ...items.filter((x) => !x.es)].slice(0, AUTOPICK_RACE);
-    const left = until - Date.now() - 500;
-    if (!order.length || left < 1e3) return { ok: false };
-    const timeoutMs = Math.min(AUTOPICK_TIMEOUT_MS, left);
-    const win = await firstFulfilled(order.map(async (x) => {
-      const srv = st.list[x.i];
-      const data = await callServer(srv, PROBE, {}, { timeoutMs });
-      if (!Array.isArray(data) || !data.length) throw new Error("respuesta inv\xE1lida");
-      return { srv, data };
-    }));
-    if (!win) return { ok: false };
-    const cur = readSrvs() || st;
-    const k = keyOf(win.srv);
-    const i = Array.isArray(cur.list) ? cur.list.findIndex((s) => keyOf(s) === k) : -1;
-    if (i < 0 || cur.chosen) return { ok: false };
-    cur.idx = i;
-    cur.ok = true;
-    cur.okAt = Date.now();
-    cur.chosen = k;
-    writeSrvs(cur);
-    rememberLiveCats(win.srv, win.data);
+    const cands = listItems(st).items.map((x) => ({ srv: st.list[x.i], es: x.es, host: hostnameOf2(st.list[x.i]) }));
+    const win = await raceAccounts(cands, Math.min(Date.now() + RACE_MS, until));
+    if (!win || !choose(win.srv, win.data)) return { ok: false };
     return { ok: true, host: hostOf(win.srv), label: labelOf2(win.srv) };
   } catch (e) {
     lastErr = errText(e);
@@ -2170,10 +2209,10 @@ async function pool(list, limit, fn) {
     while (next < list.length) await fn(list[next++]);
   }));
 }
-async function healthCheck() {
+async function healthCheck({ until: limit = Infinity, pick = false } = {}) {
   if (healthRunning) return 0;
   healthRunning = true;
-  const until = Date.now() + HEALTH_DEADLINE_MS;
+  const until = Math.min(Date.now() + HEALTH_DEADLINE_MS, limit);
   try {
     const st = await loadServers(false, { timeoutMs: LIST_TIMEOUT_MS });
     const list = st.list || [];
@@ -2181,7 +2220,9 @@ async function healthCheck() {
     const answered = /* @__PURE__ */ new Set();
     const unprobed = /* @__PURE__ */ new Set();
     const first = new Set([keyOf(list[st.idx]), st.chosen].filter(Boolean));
-    const order = [...list.filter((s) => first.has(keyOf(s))), ...list.filter((s) => !first.has(keyOf(s)))];
+    const rank = new Map(list.map((s, i) => [s, priorityOf(s) * 1e3 + i]));
+    const order = pick ? list.slice().sort((a, b) => rank.get(a) - rank.get(b)) : [...list.filter((s) => first.has(keyOf(s))), ...list.filter((s) => !first.has(keyOf(s)))];
+    let best = null;
     await pool(order, HEALTH_PARALLEL, async (s) => {
       if (!usable(s)) return;
       const left = until - Date.now();
@@ -2193,6 +2234,7 @@ async function healthCheck() {
         const data = await callServer(s, PROBE, {}, { timeoutMs: Math.min(HEALTH_TIMEOUT_MS, left - 500) });
         sets.set(keyOf(s), pairHashes(data));
         answered.add(s.url);
+        if (pick && Array.isArray(data) && data.length && (!best || rank.get(s) < rank.get(best.s))) best = { s, data };
       } catch (_) {
       }
     });
@@ -2201,6 +2243,7 @@ async function healthCheck() {
     put(HEALTH_KEY, JSON.stringify({ ts: now, online: list.filter((s) => answered.has(s.url) || unprobed.has(s.url)).map((s) => s.url) }));
     const map = groupPanels(sets, readPanels(), now);
     writePanels(map);
+    if (best) choose(best.s, best.data);
     const fresh = readSrvs() || st;
     const cur = fresh.list && fresh.list[fresh.idx];
     if (cur && online.length && !online.includes(cur.url)) {
@@ -3012,6 +3055,7 @@ var found = null;
 var pickServers = null;
 var cacheKey = null;
 var autoPickTried = false;
+var rescueTried = false;
 var pickedNow = false;
 var homeFeedData = /* @__PURE__ */ new Map();
 var homeFeedTried = false;
@@ -3155,21 +3199,32 @@ function readSnap(tab) {
     return null;
   }
 }
-var AUTOPICK_BUDGET_MS = 16e3;
+var FIRST_RUN_TICK_MS = 16e3;
 var FEED_MIN_MS = 2500;
 async function autoPick() {
   autoPickTried = true;
-  const until = Date.now() + AUTOPICK_BUDGET_MS;
+  const until = Date.now() + FIRST_RUN_TICK_MS;
   let r = null;
   try {
-    r = await autoPickServer({ until });
+    r = await autoPickServer({ until: until - FEED_MIN_MS });
   } catch (_) {
     r = null;
   }
-  if (!r || !r.ok) return;
+  if (r && r.ok) await picked(!r.kept, until);
+}
+async function rescue() {
+  rescueTried = true;
+  const until = Date.now() + FIRST_RUN_TICK_MS;
+  try {
+    await healthCheck({ until: until - FEED_MIN_MS, pick: true });
+  } catch (_) {
+  }
+  if (hasChosenServer()) await picked(true, until);
+}
+async function picked(now, until) {
   markServerChosen();
   cacheKey = serverKey();
-  pickedNow = !r.kept;
+  pickedNow = now;
   if (until - Date.now() >= FEED_MIN_MS) await loadHomeFeed({ until });
 }
 async function loadHomeFeed(opts) {
@@ -3257,7 +3312,7 @@ var tabOf = (state, route) => {
   return TAB_IDS.includes(state.tab) ? state.tab : TAB_IDS.includes(a.tab) ? a.tab : storedTab() || TAB_IDS[0];
 };
 function unitsFor(tab) {
-  if (!serverChosen()) return autoPickTried ? ["health", "pick"] : ["autopick"];
+  if (!serverChosen()) return autoPickTried ? ["rescue", "pick"] : ["autopick"];
   let base;
   if (pickedNow) base = homeFeedData.has(tab) ? ["hfeed", "health"] : ["hfeed", "cats", "tab:" + tab, "health"];
   else if (homeFeedData.has(tab)) base = ["hfeed", "health"];
@@ -3268,6 +3323,7 @@ function unitsFor(tab) {
 }
 function isDone(unit) {
   if (unit === "autopick") return autoPickTried;
+  if (unit === "rescue") return rescueTried;
   if (unit === "events") return eventsTried;
   if (unit === "hfeed") return homeFeedTried;
   if (unit === "cats") return liveCatsAll !== null;
@@ -3283,6 +3339,10 @@ function pendingUnit(state, tab) {
 async function runUnit(unit) {
   if (unit === "autopick") {
     await autoPick();
+    return;
+  }
+  if (unit === "rescue") {
+    await rescue();
     return;
   }
   if (unit === "events") {
@@ -3312,7 +3372,7 @@ function mainView(ctx) {
   const state = ctx.state || {};
   if (!serverChosen()) {
     if (!autoPickTried) return verifyingView({ device: ctx.device });
-    if (!healthReady() && !(state.failed && state.failed.health)) return verifyingView({ device: ctx.device });
+    if (!rescueTried && !(state.failed && state.failed.rescue)) return verifyingView({ device: ctx.device });
     return firstPickView({ servers: pickServers, failed: !!(state.failed && state.failed.pick), device: ctx.device });
   }
   const tab = tabOf(state, ctx.route);
