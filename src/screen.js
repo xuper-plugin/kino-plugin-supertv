@@ -6,8 +6,9 @@ import { say, twin } from "./i18n.js";
 import { put } from "./store.js";
 import { TAB_IDS, browseView, searchView, liveView, settingsView, verifyingView, firstPickView, cardOf } from "./screenView.js";
 import { fetchHomeFeed } from "./homeFeed.js";
+import { PLUGIN_VERSION } from "./version.js";
+import { cleanCards, cleanRails } from "./channelTitle.js";
 
-const PLUGIN_VERSION = "0.4.0";
 const TAB_KEY = "superTab";
 const HIST_KEY = "searchHist:v1";
 const HIST_MAX = 24;
@@ -32,9 +33,15 @@ let eventsRow = null;           // fila DINÁMICA de eventos en vivo (la única 
 let eventsTried = false;        // ya se intentó cargar los eventos en esta entrada (se reintenta en cada `open`)
 
 // La persona ya eligió servidor al menos una vez: se recuerda para no volver a mostrar el selector inicial (se cambia con 🌐).
+// The flag, or the chosen server kept with the server list (both never evicted); a missing flag is written again.
 const SRVCHOSEN_KEY = "srvChosen:v1";
-const serverChosen = () => getStored(SRVCHOSEN_KEY) === "1";
 const markServerChosen = () => { try { put(SRVCHOSEN_KEY, "1"); } catch (_) { /* da igual */ } };
+function serverChosen() {
+  if (getStored(SRVCHOSEN_KEY) === "1") return true;
+  if (!cat.hasChosenServer()) return false;
+  markServerChosen();
+  return true;
+}
 
 function resetCaches() {
   groupRails.clear();
@@ -67,7 +74,8 @@ const histKey = () => HIST_KEY + ":" + cat.serverKey();
 function readHistory() {
   try {
     const o = JSON.parse(kino.storage.get(histKey()) || "null");
-    return o && o.v === 1 && Array.isArray(o.e) ? o.e.filter((c) => c && typeof c.id === "string" && typeof c.ref === "string").slice(0, HIST_MAX) : [];
+    // Cards an older build stored keep their panel-decorated titles: cleaned on the way out, like every channel title.
+    return o && o.v === 1 && Array.isArray(o.e) ? cleanCards(o.e.filter((c) => c && typeof c.id === "string" && typeof c.ref === "string").slice(0, HIST_MAX), { lang: cat.langNow() }) : [];
   } catch (_) { return []; }
 }
 
@@ -120,14 +128,16 @@ function writeTabSnap(tab, rails) {
 function readSnap(tab) {
   try {
     const o = JSON.parse(kino.storage.get(snapKey(tab)) || "null");
-    return o && o.v === SNAP_V && Array.isArray(o.rails) && o.rails.length ? o : null;
+    // A snapshot written by an older build (or from an older feed) carries decorated titles: cleaned when read.
+    return o && o.v === SNAP_V && Array.isArray(o.rails) && o.rails.length ? { ...o, rails: cleanRails(o.rails, cat.langNow()) } : null;
   } catch (_) { return null; }
 }
 
 // Primera instalación: elige el servidor automáticamente (el primero de la lista priorizada que responda) y lo recuerda, para
-// NO mostrar el selector ni obligar a elegir. selectServer prueba el servidor (y alterna dentro del mismo país), así el elegido
-// responde. Si ninguno responde (p. ej. sin internet), queda sin elegir y mainView muestra el selector como respaldo. El 🌐
-// del header sigue permitiendo cambiarlo cuando quiera.
+// NO mostrar el selector ni obligar a elegir. Corre después del chequeo de salud: la lista ya viene sin los caídos, los
+// muertos ni los bloqueados. selectServer prueba el servidor (y alterna dentro del mismo país), así el elegido responde. Si
+// ninguno responde (p. ej. sin internet), queda sin elegir y mainView muestra el selector como respaldo. El 🌐 del header
+// sigue permitiendo cambiarlo cuando quiera.
 async function autoPick() {
   autoPickTried = true;
   try {
@@ -150,8 +160,11 @@ async function loadHomeFeed() {
   try { feed = await fetchHomeFeed(cat.serverKey()); } catch (_) { feed = null; }
   if (!feed || !feed.tabs) return;
   for (const tab of Object.keys(feed.tabs)) {
-    homeFeedData.set(tab, feed.tabs[tab]);
-    writeTabSnap(tab, feed.tabs[tab]);
+    // The feed is built by the Action from the published code: a feed from before the title cleanup still carries the
+    // panels' decorated names. Cleaning again is a no-op on titles already clean.
+    const rails = cleanRails(feed.tabs[tab], cat.langNow());
+    homeFeedData.set(tab, rails);
+    writeTabSnap(tab, rails);
   }
 }
 
@@ -229,8 +242,9 @@ const tabOf = (state, route) => {
 // Primero el feed pre-armado (una sola descarga): si está, el Home sale al instante y NO se recorre el IPTV. Si el feed
 // tiene el tab, no hace falta nada más; si falta/está viejo/falló, se cae a la carga en vivo (categorías + filas del tab).
 function unitsFor(tab) {
-  // Primera instalación: se elige servidor automáticamente (autopick). Si no logró ninguno, se cae al selector manual.
-  if (!serverChosen()) return autoPickTried ? ["health", "pick"] : ["autopick"];
+  // Primera instalación: chequeo de salud y luego se elige servidor automáticamente (autopick) entre los que responden. Si
+  // no logró ninguno, se cae al selector manual.
+  if (!serverChosen()) return autoPickTried ? ["health", "pick"] : ["health", "autopick"];
   let base;
   if (homeFeedData.has(tab)) base = ["hfeed", "health"];
   else if (!homeFeedTried) base = ["hfeed", "health", "cats", "tab:" + tab];

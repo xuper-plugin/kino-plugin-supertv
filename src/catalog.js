@@ -4,11 +4,22 @@
 import { put } from "./store.js";
 import { countryMatch, COUNTRY_PHRASES } from "./names.js";
 import { mergeLive } from "./categories.js";
+import { say } from "./i18n.js";
+import { keyOf, pairHashes, groupPanels, readPanels, writePanels, panelOf, noteDead, noteBlocked, noteAlive, usable, accountVerdict } from "./panels.js";
+import { categoryTok, channelTok } from "./channelMatch.js";
+import { createLiveFailover, liveRef } from "./liveFailover.js";
+import { channelTitles, cleanChannelTitle, categoryKey, normName } from "./channelTitle.js";
+
+export { keyOf };
 
 const BOOTSTRAP_URL = "http://vegetatvv2.duckdns.org/bootstrap.php";
 const VEGETA_VERSION_CODE = "21"; // versionCode de la app (VegetaTV 11.1): el bootstrap rechaza menos de 21 con 426
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 horas
 const SRVS_V = 2; // versión de la caché de servidores: subir para invalidar listas viejas (p. ej. sin el país del servidor)
+
+// SuperTV is live-only: a server is checked with its live categories everywhere (an empty VOD list says nothing about it).
+const PROBE = "get_live_categories";
+const SRVCHOSEN_KEY = "srvChosen:v1"; // written by the screen when the person (or the first-run auto-pick) chose a server
 
 const PER_PAGE = 60;
 const HOME_PREVIEW = 20;
@@ -86,10 +97,11 @@ function parseServers(text) {
 
 // El bootstrap exige un código de versión mínimo (426 / ok:false). Se parte del guardado y se reintenta UNA vez con el
 // mayor entre minimum_version_code y latest_version_code que el propio servicio declare; el que funciona se guarda.
-async function fetchServerList() {
+async function fetchServerList(opts) {
+  const t = opts && opts.timeoutMs ? { timeoutMs: opts.timeoutMs } : {};
   let code = readVersionCode();
   for (let attempt = 0; attempt < 2; attempt++) {
-    const r = await kino.fetch(BOOTSTRAP_URL + "?v=" + Date.now(), { headers: { ...vegetaHeaders(code), "Accept": "application/json" } });
+    const r = await kino.fetch(BOOTSTRAP_URL + "?v=" + Date.now(), { headers: { ...vegetaHeaders(code), "Accept": "application/json" }, ...t });
     let data = null;
     try { data = r.json(); } catch (_) { data = null; }
     if (!r.ok || !data || data.ok === false) {
@@ -101,7 +113,7 @@ async function fetchServerList() {
     let list = [];
     if (typeof data.servers_text === "string" && data.servers_text.trim()) list = parseServers(data.servers_text);
     if (!list.length && typeof data.servers_url === "string" && data.servers_url.trim()) {
-      const r2 = await kino.fetch(data.servers_url, { headers: { ...vegetaHeaders(code), "Accept": "text/plain" } });
+      const r2 = await kino.fetch(data.servers_url, { headers: { ...vegetaHeaders(code), "Accept": "text/plain" }, ...t });
       if (r2.ok) list = parseServers(r2.text());
     }
     if (!list.length) {
@@ -115,17 +127,7 @@ async function fetchServerList() {
   throw kino.error("unavailable", "bootstrap: sin servidores", { userMessage: "El servicio no tiene servidores disponibles." });
 }
 
-// Clave corta del servidor activo (sin usuario ni contraseña a la vista): separa las cachés de catálogo entre servidores.
-// Clave estable de un servidor (misma cuenta en el mismo host): identifica un servidor concreto en los `ref` de las
-// fuentes alternativas, sin exponer usuario ni contraseña.
-export function keyOf(srv) {
-  if (!srv || !srv.url) return "";
-  let h = 5381;
-  const text = srv.url + "|" + srv.username;
-  for (let i = 0; i < text.length; i++) h = ((h << 5) + h + text.charCodeAt(i)) | 0;
-  return (h >>> 0).toString(36);
-}
-
+// Clave corta del servidor activo (keyOf, sin usuario ni contraseña a la vista): separa las cachés de catálogo entre servidores.
 export function serverKey() {
   const st = readSrvs();
   const srv = st && Array.isArray(st.list) ? st.list[st.idx] : null;
@@ -147,21 +149,55 @@ function writeSrvs(st) {
   put("srvs", JSON.stringify(st));
 }
 
-// Estado en storage: { ts, list, idx (servidor activo), ok (idx ya comprobado) }.
-async function loadServers(force) {
-  const cached = readSrvs();
-  const usable = cached && Array.isArray(cached.list) && cached.list.length;
-  if (!force && usable && cached.ts && cached.v === SRVS_V && Date.now() - cached.ts < CACHE_TTL_MS) return cached;
+// Before 0.4.1 a choice was only `pin` (also set by the health check's jump) plus the screen's flag, which the 2 KB "misc"
+// storage class could evict. Once: the server active then becomes the person's `chosen` server, and `pin` goes away.
+function migrate(st) {
+  if (!st || !Array.isArray(st.list) || st.mig === 1) return st;
+  let flag = null;
+  try { flag = kino.storage.get(SRVCHOSEN_KEY); } catch (_) { flag = null; }
+  if (st.chosen === undefined && (st.pin || flag === "1") && st.list[st.idx]) st.chosen = keyOf(st.list[st.idx]);
+  delete st.pin;
+  st.mig = 1;
+  writeSrvs(st);
+  return st;
+}
+
+// A new list keeps the person's choice: the chosen server (when it is still listed and not dead), else the one active
+// before, else home. Without this every 6-hour refresh went back to the first server and lost the choice.
+function carryOver(prev, st) {
+  if (!prev) { st.idx = homeIdx(st); return st; }
+  const keys = st.list.map(keyOf);
+  const at = (k) => (k ? keys.indexOf(k) : -1);
+  if (prev.chosen) st.chosen = prev.chosen;
+  if (prev.mig) st.mig = prev.mig;
+  const c = at(prev.chosen);
+  const a = at(keyOf(prev.list[prev.idx]));
+  st.idx = c >= 0 && usable(st.list[c]) ? c : a >= 0 ? a : homeIdx(st);
+  if (st.idx === a) { st.ok = !!prev.ok; st.okAt = prev.okAt; st.homeAt = prev.homeAt; }
+  return st;
+}
+
+// Estado en storage: { ts, list, idx (servidor activo), ok (idx ya comprobado), chosen (clave del elegido por la persona) }.
+async function loadServers(force, opts) {
+  const cached = migrate(readSrvs());
+  const usableList = cached && Array.isArray(cached.list) && cached.list.length;
+  if (!force && usableList && cached.ts && cached.v === SRVS_V && Date.now() - cached.ts < CACHE_TTL_MS) return cached;
   try {
-    const list = await fetchServerList();
-    const st = { ts: Date.now(), list, idx: 0, ok: false, v: SRVS_V };
+    const list = await fetchServerList(opts);
+    const st = carryOver(usableList ? cached : null, { ts: Date.now(), list, idx: 0, ok: false, v: SRVS_V });
     writeSrvs(st);
     return st;
   } catch (e) {
     lastErr = "lista: " + errText(e);
-    if (usable) return cached; // bootstrap caído: seguimos con la lista vieja
+    if (usableList) return cached; // bootstrap caído: seguimos con la lista vieja
     throw e;
   }
+}
+
+/** The person (or the first-run auto-pick) chose a server: a key in `srvs`, never evicted. */
+export function hasChosenServer() {
+  const st = migrate(readSrvs());
+  return !!(st && st.chosen);
 }
 
 // ---- Xtream Codes API -----------------------------------------------------------
@@ -175,39 +211,87 @@ function badAnswer(action, data) {
   return data.length === 0 && action.endsWith("_categories");
 }
 
-async function callServer(srv, action, extra) {
+const hostnameOf = (srv) => { try { return new URL(srv.url).hostname; } catch (_) { return ""; } };
+
+// One Xtream call. Remembers the account: dead (auth 0 / expired) for a day, blocked (Kino refuses this server's own host)
+// until the next version. A refusal of ANOTHER host (an ISP block that redirects to a government page over http) is a plain
+// failure: it depends on the network, not on the account. opts.timeoutMs: the health check and the failover keep it short.
+async function callServer(srv, action, extra, opts) {
   const params = new URLSearchParams({ username: srv.username, password: srv.password, action, ...extra });
-  const r = await kino.fetch(`${srv.url}/player_api.php?${params}`, {
-    headers: {
-      "Accept": "application/json,text/plain,*/*",
-      "Cache-Control": "no-cache",
-      "Pragma": "no-cache",
-      "User-Agent": "Mozilla/5.0 (compatible; VegetaTVCache/2.0)"
-    }
-  });
+  let r;
+  try {
+    r = await kino.fetch(`${srv.url}/player_api.php?${params}`, {
+      headers: {
+        "Accept": "application/json,text/plain,*/*",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "User-Agent": "Mozilla/5.0 (compatible; VegetaTVCache/2.0)"
+      },
+      ...(opts && opts.timeoutMs ? { timeoutMs: opts.timeoutMs } : {}),
+    });
+  } catch (e) {
+    if (e && e.code === "host_not_allowed" && e.host && e.host === hostnameOf(srv)) noteBlocked(srv);
+    throw e;
+  }
   if (!r.ok) throw new Error("API " + r.status);
-  const data = r.json();
+  let data;
+  try { data = r.json(); } catch (_) { throw new Error("respuesta inválida"); }
+  if (accountVerdict(data) === "dead") {
+    noteDead(srv);
+    throw Object.assign(new Error("cuenta no válida"), { dead: true });
+  }
   if (badAnswer(action, data)) throw new Error("respuesta inválida");
+  noteAlive(srv);
   return data;
 }
 
-// El servidor "de casa" es el primero de la lista (HTTPS primero): al que se vuelve cuando responde tras un fallo.
+// The live categories a probe just brought, kept as that server's category cache (no second request when it becomes active).
+function rememberLiveCats(srv, data) {
+  const k = keyOf(srv);
+  if (!k || !Array.isArray(data) || !data.length) return;
+  const list = data.map((c) => ({ category_id: String(c.category_id || ""), category_name: String(c.category_name || "").trim() }));
+  if (serverKey() === k) catMemo.live = { key: k, ts: Date.now(), list };
+  put("cats:live:" + k, JSON.stringify({ ts: Date.now(), l: list.map((c) => [c.category_id, c.category_name]) }));
+}
+
+// El servidor "de casa" es el primero de la lista (HTTPS primero).
 function homeIdx(_st) {
   return 0;
 }
 
-// Tras un fallo se pasó a otro servidor: se vuelve al de casa en cuanto responde (se mira cada 5 min), salvo que la persona haya
-// elegido otro a mano con «Cambiar servidor».
+// Where backHome returns: the person's chosen server, else home.
+function backTarget(st) {
+  if (st.chosen) {
+    const i = st.list.findIndex((s) => keyOf(s) === st.chosen);
+    if (i >= 0) return i;
+  }
+  return homeIdx(st);
+}
+
+// Tras un fallo (o el salto del chequeo de salud) se pasó a otro servidor: se vuelve al elegido por la persona (o al de casa)
+// en cuanto responde. Se mira cada 5 min; nunca a uno muerto o bloqueado (cero peticiones).
 async function backHome() {
   const st = await loadServers(false);
-  const home = homeIdx(st);
-  if (st.idx === home || st.pin || Date.now() - (st.homeAt || 0) < 300000) return;
+  const target = backTarget(st);
+  if (st.idx === target || Date.now() - (st.homeAt || 0) < 300000 || !usable(st.list[target])) return;
   st.homeAt = Date.now();
   try {
-    await callServer(st.list[home], "get_vod_categories", {});
-    st.idx = home; st.ok = true; st.okAt = Date.now();
+    const data = await callServer(st.list[target], PROBE, {});
+    st.idx = target; st.ok = true; st.okAt = Date.now();
+    rememberLiveCats(st.list[target], data);
   } catch (_) { /* sigue en el actual */ }
   writeSrvs(st);
+}
+
+// The failover walk: the active server, then the other accounts of its panel (same ids, same lists), then the rest in
+// list order. Dead and blocked accounts cost no request.
+function walkOrder(st) {
+  const n = st.list.length;
+  const map = readPanels();
+  const p = panelOf(keyOf(st.list[st.idx]), map);
+  const ring = Array.from({ length: n }, (_, j) => (st.idx + j) % n);
+  const same = p ? ring.filter((i) => i !== st.idx && panelOf(keyOf(st.list[i]), map) === p) : [];
+  return [st.idx, ...same, ...ring.filter((i) => i !== st.idx && !same.includes(i))].filter((i) => usable(st.list[i]));
 }
 
 async function api(action, extra = {}) {
@@ -217,8 +301,7 @@ async function api(action, extra = {}) {
     if (pass === 0) await backHome();
     const st2 = readSrvs();
     if (st2 && pass === 0) { st.idx = st2.idx; st.ok = st2.ok; st.okAt = st2.okAt; st.homeAt = st2.homeAt; }
-    for (let n = 0; n < st.list.length; n++) {
-      const i = (st.idx + n) % st.list.length;
+    for (const i of walkOrder(st)) {
       try {
         const data = await callServer(st.list[i], action, extra);
         if (i !== st.idx || !st.ok || Date.now() - (st.okAt || 0) > 5000) {
@@ -236,15 +319,6 @@ async function api(action, extra = {}) {
     }
   }
   throw kino.error("unavailable", "ningún servidor respondió (" + action + "): " + last, { userMessage: "Error al contactar el servidor." });
-}
-
-async function activeServer() {
-  let st = await loadServers(false);
-  if (!st.ok) {
-    await api("get_vod_categories");
-    st = readSrvs();
-  }
-  return st.list[st.idx];
 }
 
 // ---- estado y cambio de servidor (ajustes) ---------------------------------------
@@ -285,7 +359,7 @@ export async function serverStatus() {
   // Si ya hubo una respuesta buena de este servidor, se informa sin otra petición (el servicio puede tardar y el estado caducaba).
   if (cached && cached.ok && cached.list && cached.list[cached.idx] && Date.now() - (cached.okAt || 0) < 20000) return { ok: true, host: hostOf(cached.list[cached.idx]), index: cached.idx + 1, total: cached.list.length, at: cached.okAt };
   try {
-    await api("get_vod_categories");
+    await api(PROBE);
     const st = readSrvs();
     return { ok: true, host: hostOf(st.list[st.idx]), index: st.idx + 1, total: st.list.length, at: st.okAt };
   } catch (e) {
@@ -301,13 +375,15 @@ export async function switchServer() {
   const https = st.list.filter((s) => String(s.url).startsWith("https://")).length;
   for (let k = 1; k < n; k++) {
     const i = (st.idx + k) % n;
+    if (!usable(st.list[i])) continue;
     try {
-      await callServer(st.list[i], "get_vod_categories", {});
+      const data = await callServer(st.list[i], PROBE, {});
       st.idx = i;
       st.ok = true;
       st.okAt = Date.now();
-      st.pin = i !== homeIdx(st); // elegido a mano: no se vuelve solo al de casa
+      st.chosen = keyOf(st.list[i]); // elegido a mano: es adonde se vuelve
       writeSrvs(st);
+      rememberLiveCats(st.list[i], data);
       return { changed: true, host: hostOf(st.list[i]), index: i + 1, total: n };
     } catch (e) { lastErr = errText(e); }
   }
@@ -323,13 +399,16 @@ function srvPriority(x) {
   if (!code) return 2; // Global / sin país
   return 3;
 }
+const flagOf = (srv) => { const fi = flagInfo(labelOf(srv)); return fi ? fi.code : ""; };
+const priorityOf = (srv) => srvPriority({ flag: flagOf(srv), label: niceLabel(srv) });
 
 // La lista para el selector (nunca usuario ni contraseña). Con un chequeo de salud fresco, solo muestra los que responden.
 export async function serverList() {
   const st = await loadServers(false);
   const h = healthFresh();
   const online = h ? new Set(h.online) : null;
-  let items = (st.list || []).map((s, i) => {
+  // Dead (auth 0) and blocked accounts are never offered: the first-run auto-pick and the picker skip them.
+  let items = (st.list || []).map((s, i) => ({ s, i })).filter(({ s }) => usable(s)).map(({ s, i }) => {
     const fi = flagInfo(labelOf(s));
     const flag = fi ? fi.code : "";
     const label = niceLabel(s);
@@ -350,12 +429,14 @@ export async function selectServer(i) {
   if (!(start >= 0 && start < n)) return { ok: false };
   const wantLabel = labelOf(st.list[start]);
   const all = Array.from({ length: n }, (_, k) => k);
-  const order = [start, ...all.filter((k) => k !== start && labelOf(st.list[k]) === wantLabel)].slice(0, 5);
+  // The tapped one is always tried once; its same-country fallbacks skip dead and blocked accounts.
+  const order = [start, ...all.filter((k) => k !== start && labelOf(st.list[k]) === wantLabel && usable(st.list[k]))].slice(0, 5);
   for (const idx of order) {
     try {
-      await callServer(st.list[idx], "get_live_categories", {});
-      st.idx = idx; st.ok = true; st.okAt = Date.now(); st.pin = idx !== homeIdx(st);
+      const data = await callServer(st.list[idx], PROBE, {});
+      st.idx = idx; st.ok = true; st.okAt = Date.now(); st.chosen = keyOf(st.list[idx]);
       writeSrvs(st);
+      rememberLiveCats(st.list[idx], data);
       return { ok: true, host: hostOf(st.list[idx]), label: labelOf(st.list[idx]), index: idx + 1, total: n, exact: idx === start };
     } catch (e) { lastErr = errText(e); }
   }
@@ -374,24 +455,64 @@ const healthFresh = () => { const h = readHealth(); return h && Date.now() - h.t
 export const healthNeeded = () => !healthFresh() && !healthRunning;
 export const healthReady = () => !!healthFresh();
 
-const probeAlive = async (srv) => { try { await callServer(srv, "get_live_categories", {}); return true; } catch (_) { return false; } };
+const HEALTH_TIMEOUT_MS = 10000;
+// The check runs inside one screen call (Kino gives it 20 s, ScreenLimits.CALL_TIMEOUT_MS): it stops starting probes at
+// this deadline and writes what answered. Kino runs 6 of a plugin's requests at once, so a probe started here starts there
+// and its timeout is the time it really has.
+const HEALTH_DEADLINE_MS = 15000;
+const HEALTH_PARALLEL = 6;
+const LIST_TIMEOUT_MS = 4000;
 
-// Prueba todos los servidores en paralelo y guarda las URLs de los que responden; si el activo quedó caído, salta al primero
-// online. Corre ANTES del Home (pantalla "Verificando servidores…"). Una corrida a la vez; nunca lanza (si no se pudo ni
-// cargar la lista, marca el chequeo hecho y vacío para no colgar la verificación).
+// At most [limit] calls of [fn] at once over [list].
+async function pool(list, limit, fn) {
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(limit, list.length) }, async () => {
+    while (next < list.length) await fn(list[next++]);
+  }));
+}
+
+// Probes the servers 6 at a time (never a dead or blocked account: zero requests), the active and the chosen one first, within
+// HEALTH_DEADLINE_MS, and stores the URLs of those that answer; a server the deadline left unprobed is stored with them (not
+// known down: the picker keeps offering it), never as down. With the same answers it groups the servers into panels (0 extra
+// requests). When the active server is down it jumps to one that answered: same panel, then same country, then by priority.
+// The jump never touches `chosen` (backHome returns there). Runs BEFORE the Home ("Verificando servidores…" screen). One run
+// at a time; never throws.
 export async function healthCheck() {
   if (healthRunning) return 0;
   healthRunning = true;
+  const until = Date.now() + HEALTH_DEADLINE_MS;
   try {
-    const st = await loadServers(false);
+    const st = await loadServers(false, { timeoutMs: LIST_TIMEOUT_MS });
     const list = st.list || [];
-    const results = await Promise.all(list.map(async (s) => ((await probeAlive(s)) ? s.url : null)));
-    const online = results.filter(Boolean);
-    put(HEALTH_KEY, JSON.stringify({ ts: Date.now(), online }));
-    const cur = list[st.idx];
+    const sets = new Map();
+    const answered = new Set();
+    const unprobed = new Set();
+    const first = new Set([keyOf(list[st.idx]), st.chosen].filter(Boolean));
+    const order = [...list.filter((s) => first.has(keyOf(s))), ...list.filter((s) => !first.has(keyOf(s)))];
+    await pool(order, HEALTH_PARALLEL, async (s) => {
+      if (!usable(s)) return;
+      const left = until - Date.now();
+      if (left < 1500) { unprobed.add(s.url); return; }
+      try {
+        const data = await callServer(s, PROBE, {}, { timeoutMs: Math.min(HEALTH_TIMEOUT_MS, left - 500) });
+        sets.set(keyOf(s), pairHashes(data));
+        answered.add(s.url);
+      } catch (_) { /* down */ }
+    });
+    const online = list.filter((s) => answered.has(s.url)).map((s) => s.url);
+    const now = Date.now();
+    put(HEALTH_KEY, JSON.stringify({ ts: now, online: list.filter((s) => answered.has(s.url) || unprobed.has(s.url)).map((s) => s.url) }));
+    const map = groupPanels(sets, readPanels(), now);
+    writePanels(map);
+    const fresh = readSrvs() || st;
+    const cur = fresh.list && fresh.list[fresh.idx];
     if (cur && online.length && !online.includes(cur.url)) {
-      const i = list.findIndex((s) => s.url === online[0]);
-      if (i >= 0) { st.idx = i; st.ok = true; st.okAt = Date.now(); st.pin = true; writeSrvs(st); }
+      const p = panelOf(keyOf(cur), map);
+      const flag = flagOf(cur);
+      const score = (s) => [p && panelOf(keyOf(s), map) === p ? 0 : 1, flagOf(s) === flag ? 0 : 1, priorityOf(s)];
+      const cands = fresh.list.map((s, i) => ({ s, i, sc: score(s) })).filter((x) => online.includes(x.s.url))
+        .sort((a, b) => a.sc[0] - b.sc[0] || a.sc[1] - b.sc[1] || a.sc[2] - b.sc[2] || a.i - b.i);
+      if (cands.length) { fresh.idx = cands[0].i; fresh.ok = true; fresh.okAt = now; writeSrvs(fresh); }
     }
     return online.length;
   } catch (_) {
@@ -405,7 +526,7 @@ export async function refreshServers() {
   const st = await loadServers(true);
   const fresh = !before || st.ts !== before.ts; // la lista se pidió de nuevo (si el arranque falla, loadServers devuelve la vieja)
   let ok = fresh;
-  if (fresh) { try { await api("get_vod_categories"); } catch (_) { /* la lista nueva ya está; el servidor se prueba al usarlo */ } }
+  if (fresh) { try { await api(PROBE); } catch (_) { /* la lista nueva ya está; el servidor se prueba al usarlo */ } }
   const now = readSrvs() || st;
   return { ok, total: now.list.length, host: hostOf(now.list[now.idx]) };
 }
@@ -509,14 +630,28 @@ export async function browse(ref, cursor) {
   return { items: all.slice(start, start + PER_PAGE), next: all.length > start + PER_PAGE ? String(page + 1) : undefined };
 }
 
-function liveItem(s, categoryId, adult) {
+// The category's name by id, from the live categories in memory (the listing's own server).
+let catNames = { list: null, map: null };
+function catNameOf(catId) {
+  const m = catMemo.live;
+  if (!m || !Array.isArray(m.list)) return "";
+  if (catNames.list !== m.list) catNames = { list: m.list, map: new Map(m.list.map((c) => [String(c.category_id), c.category_name])) };
+  return catNames.map.get(String(catId)) || "";
+}
+
+// A live item. Its ref carries the category (id and name) and the channel's name, identical for every account of a
+// panel: resolve() can then tell whether the id belongs to the active server's panel and find the channel by name on
+// another panel when every account of its own refuses it. The ref always reads the panel's RAW name; [shown] (the name
+// without its decorations, channelTitles) is only what the person sees.
+function liveItem(s, categoryId, adult, shown) {
   const id = String(s.stream_id || "");
-  const title = String(s.name || "").trim();
-  if (!id || !title) return null;
+  const raw = String(s.name || "").trim();
+  if (!id || !raw) return null;
+  const catId = String(categoryId || s.category_id || "");
   return {
     id: "live-" + id,
-    title,
-    ref: "live:" + id,
+    title: shown || raw,
+    ref: liveRef(id, catId, categoryTok(catNameOf(catId)), channelTok(raw)),
     logo: img(s.stream_icon),
     number: parseInt(s.num, 10) || undefined,
     categoryId: String(categoryId || s.category_id || ""),
@@ -530,12 +665,26 @@ export async function liveChannels({ categoryId, cursor }) {
   if (adult && !showAdult()) return { items: [] };
   const all = await fetchCategory("get_live_streams", String(categoryId || ""));
   const start = Math.max(0, parseInt(cursor, 10) || 0);
-  const items = all.slice(start, start + LIVE_PAGE).map((s) => liveItem(s, categoryId, adult)).filter(Boolean);
+  // Shown titles over the whole category (not the page): a channel looks the same on every page.
+  const shown = shownTitles(all, categoryKey(catNameOf(categoryId)));
+  const items = [];
+  for (let i = start; i < Math.min(all.length, start + LIVE_PAGE); i++) { const it = liveItem(all[i], categoryId, adult, shown[i]); if (it) items.push(it); }
   return { items, next: all.length > start + LIVE_PAGE ? String(start + LIVE_PAGE) : undefined };
 }
 
+// The shown titles of one list of panel streams (`[{ name }]`) whose category's country or region is [catKey].
+const shownTitles = (streams, catKey) => channelTitles(streams.map((s) => (s && s.name) || ""), { cat: catKey, lang: langNow() });
+
+// Whether a stream's name holds [q] (lowercase): as the panel writes it, or as the person sees it. The shown title only adds
+// text the raw name lacks when it gained a " · " or a quality moved to its end, so only such a query cleans each name.
+const SHOWN_ONLY = /·|\b(?:4k|8k|uhd|fhd|hd|sd|hevc)\b/;
+const nameHas = (s, q) => {
+  const raw = String((s && s.name) || "");
+  return raw.toLowerCase().replace(/\s+/g, " ").includes(q) || (SHOWN_ONLY.test(q) && cleanChannelTitle(raw).title.toLowerCase().includes(q));
+};
+
 export async function liveSearchDetailed({ query }, { budgetMs = 11000 } = {}) {
-  const q = String(query || "").trim().toLowerCase();
+  const q = String(query || "").trim().toLowerCase().replace(/\s+/g, " ");
   if (q.length < 2) return { items: [], partial: false };
   const deadline = Date.now() + budgetMs;
   const cats = visibleLive(await liveCats());
@@ -553,7 +702,7 @@ export async function liveSearchDetailed({ query }, { budgetMs = 11000 } = {}) {
     const batch = await Promise.all(slice.map(async (cat) => {
       try {
         const data = await fetchCategory("get_live_streams", cat.id);
-        return data.filter((s) => String(s.name || "").toLowerCase().includes(q)).map((s) => liveItem(s, cat.id, cat.adult)).filter(Boolean)
+        return data.filter((s) => nameHas(s, q)).map((s) => liveItem(s, cat.id, cat.adult)).filter(Boolean)
           .map((it) => ({ ...it, adult: cat.adult === true }));
       } catch (e) {
         if (e && e.code === "rate_limited") capped = true; else failed++;
@@ -565,6 +714,11 @@ export async function liveSearchDetailed({ query }, { budgetMs = 11000 } = {}) {
   }
   if (items.length < LIMIT && scanned < cats.length) capped = true;
   if (!items.length && failed) throw kino.error("unavailable", "la búsqueda no pudo completarse", { userMessage: "No se pudo completar la búsqueda." });
+  // The hits are one mixed list: their shown titles are worked out together. A query that IS a hit's raw name (Kino looks a
+  // channel saved under its old, decorated name up this way) gets that hit under its raw name, so Kino recognises it.
+  const shown = shownTitles(items.map((it) => ({ name: it.title })), "");
+  const asked = normName(query);
+  items.forEach((it, i) => { if (normName(it.title) !== asked) it.title = shown[i]; });
   return { items, partial: failed > 0 || capped };
 }
 
@@ -627,6 +781,8 @@ export async function countryRow(limit = 20) {
       items.push({ id: it.id, ref: it.ref, title: it.title, kind: "live", poster: it.logo, ...(c.adult ? { adult: true } : {}) });
     }
   }
+  const shown = shownTitles(items.map((it) => ({ name: it.title })), cc.toLowerCase());
+  items.forEach((it, i) => { it.title = shown[i]; });
   return items.length ? { id: "live-country", title: "Canales en vivo", items } : null;
 }
 
@@ -667,34 +823,67 @@ export async function guide({ channelIds, from, to }) {
 
 // ---- resolve --------------------------------------------------------------------
 
-// ---- fuentes por servidor (el menú "Servidor" del reproductor) -----------------------------------------
-// Los servidores son espejos y comparten el id de stream del canal. Una fuente alternativa es el MISMO canal (mismo id) en
-// otro servidor online, etiquetado por país. Perezosa: solo se resuelve al elegirla. En vivo no tiene consulta por id (verificar
-// exigiría bajar toda la lista, ~MB → riesgo de OOM), así que se muestran todos los online y el que no lo tenga lo cubre el
-// fallback del reproductor (sin "aprende" para en vivo).
-function buildAlternatives(id, activeKey) {
-  const st = readSrvs();
-  if (!id || !st || !Array.isArray(st.list)) return [];
-  const h = healthFresh();
-  const online = h ? new Set(h.online) : null;
-  const countBy = {}; // cuántos servidores por país: para desambiguar los repetidos con el host
-  const out = [];
-  for (const srv of st.list) {
-    const k = keyOf(srv);
-    if (!k || k === activeKey) continue;
-    if (online && !online.has(srv.url)) continue; // solo online, si hay chequeo fresco
-    const base = niceLabel(srv);
-    countBy[base] = (countBy[base] || 0) + 1;
-    out.push({ k, base, host: hostOf(srv) });
-  }
-  const label = (e) => (countBy[e.base] > 1 && e.host ? `${e.base} · ${e.host}` : e.base);
-  return out.slice(0, 12).map((e) => ({ label: label(e), ref: `at:${e.k}~l~${id}` }));
+// ---- live failover ---------------------------------------------------------------------------------------------------
+
+// The cached live categories of [srv] (memory or storage, any age) and when they were fetched: no request.
+function cachedLive(srv) {
+  const k = keyOf(srv);
+  if (!k) return null;
+  const m = catMemo.live;
+  if (m && m.key === k && Array.isArray(m.list)) return { ts: m.ts, list: m.list };
+  try {
+    const o = JSON.parse(kino.storage.get("cats:live:" + k) || "null");
+    if (o && Array.isArray(o.l)) return { ts: o.ts, list: o.l.map(([category_id, category_name]) => ({ category_id: String(category_id), category_name: String(category_name) })) };
+  } catch (_) { /* not cached */ }
+  return null;
 }
+const cachedCats = (srv) => { const c = cachedLive(srv); return c ? c.list : null; };
+const cachedCatsAt = (srv) => { const c = cachedLive(srv); return c && typeof c.ts === "number" ? c.ts : null; };
+
+// The server list for a live resolve: the cached one (even past its 6 h), never a failover walk; the bootstrap only on a
+// fresh install, with short timeouts (resolve has 20 s).
+async function liveServers() {
+  const st = readSrvs();
+  if (st && Array.isArray(st.list) && st.list.length) return st;
+  return loadServers(false, { timeoutMs: 4000 });
+}
+
+// A per-install number: equally ranked accounts are not all picked in the same order by every device (the accounts are
+// shared and allow 1-3 connections).
+let seedMemo = "";
+function installSeed() {
+  if (seedMemo) return seedMemo;
+  let v = null;
+  try { v = kino.storage.get("seed:v1"); } catch (_) { v = null; }
+  if (!v || !/^\d+$/.test(v)) { v = String(Math.floor(Math.random() * 1e9)); put("seed:v1", v); }
+  seedMemo = v;
+  return v;
+}
+
+export const langNow = () => { try { return /^en/i.test(String(kino.lang || "")) ? "en" : "es"; } catch (_) { return "es"; } };
+
+const failover = createLiveFailover({
+  servers: liveServers,
+  cachedCats,
+  catsAt: cachedCatsAt,
+  storeCats: rememberLiveCats,
+  callServer,
+  playUrl: (srv, id, format) => `${srv.url}/live/${srv.username}/${srv.password}/${id}.${format || liveFormat()}`,
+  label: niceLabel,
+  host: hostOf,
+  online: () => { const h = healthFresh(); return h ? new Set(h.online) : null; },
+  flag: flagOf,
+  priority: priorityOf,
+  seed: installSeed,
+  now: () => Date.now(),
+  unavailable: () => kino.error("unavailable", "no account plays this channel now", { userMessage: say("liveNoServer", langNow()) }),
+  notFound: () => kino.error("not_found", "channel not found"),
+});
 
 export async function resolve(ref) {
   const s = String(ref || "");
 
-  // Fuente alternativa: el mismo canal en otro servidor (no el activo, y sin cambiarlo).
+  // Fuente alternativa (el menú "Servidor"): el canal en otro servidor elegido por la persona (no el activo, y sin cambiarlo).
   if (s.startsWith("at:")) {
     const segs = s.slice(3).split("~");
     const srv = serverByKey(segs[0]);
@@ -702,17 +891,7 @@ export async function resolve(ref) {
     if (!srv || segs[1] !== "l" || !/^\d+$/.test(id)) throw kino.error("not_found", "fuente desconocida");
     return { url: `${srv.url}/live/${srv.username}/${srv.password}/${id}.${liveFormat()}` };
   }
-
-  const active = await activeServer();
-  const { url, username, password } = active;
-  if (s.startsWith("live:")) {
-    const id = s.slice(5).split("~")[0];
-    if (!/^\d+$/.test(id)) throw kino.error("not_found");
-    const out = { url: `${url}/live/${username}/${password}/${id}.${liveFormat()}` };
-    const alts = buildAlternatives(id, serverKey());
-    if (alts.length) { out.alternatives = alts; out.label = niceLabel(active); } // etiqueta del servidor activo en el menú "Servidor"
-    return out;
-  }
+  if (s.startsWith("live:")) return failover.resolve(s);
   throw kino.error("not_found", "ref desconocido: " + s.slice(0, 30));
 }
 
