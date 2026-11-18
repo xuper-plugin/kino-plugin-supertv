@@ -1053,7 +1053,11 @@ function createLiveFailover(deps) {
     const key = keyOf(srv) + "|" + catId;
     const m = lists.get(key);
     if (m && fresh(m.ts, LIST_MS)) return m.list;
-    const data = await call2(ctx, srv, "get_live_streams", { category_id: String(catId) });
+    let data = typeof deps.cachedList === "function" ? deps.cachedList(srv, catId) : null;
+    if (!Array.isArray(data)) {
+      data = await call2(ctx, srv, "get_live_streams", { category_id: String(catId) });
+      if (Array.isArray(data) && typeof deps.keepList === "function") deps.keepList(srv, catId, data);
+    }
     if (!Array.isArray(data)) return null;
     const list = data.map((s) => ({ stream_id: String(s && s.stream_id || ""), name: String(s && s.name || "") }));
     lists.delete(key);
