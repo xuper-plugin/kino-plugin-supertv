@@ -4,6 +4,7 @@
 // the channel's raw name) with no request, so the live failover covers Home rows right after the update.
 import test from "node:test";
 import assert from "node:assert/strict";
+import { gzipSync, gunzipSync } from "node:zlib";
 import { installKino, res, kinoError, param, fresh } from "./helpers/fake-kino.mjs";
 import { parseLiveRef, liveRef } from "../src/liveFailover.js";
 import { categoryTok, channelTok } from "../src/channelMatch.js";
@@ -18,35 +19,39 @@ test.afterEach(() => { Date.now = realNow; });
 const RAW = "raw.githubusercontent.com";
 const KEY = "1abcdef";
 
-// A sealed feed as the plugin sees it: the fake decrypt only checks the call and decodes the payload.
+// A sealed feed as the plugin sees it: the fake decrypt only checks the call and decodes the payload (base64 out when asked,
+// as Kino's outputEncoding). box2: feed v2, gzip inside the envelope. [gunzip]: Kino's kino.crypto.gunzip (0.9.74).
 const box = (obj) => JSON.stringify({ v: 1, iv: "AAAAAAAAAAAAAAAA", data: Buffer.from(JSON.stringify(obj)).toString("base64") });
-function sealing(kino) {
+const box2 = (obj) => JSON.stringify({ v: 2, iv: "AAAAAAAAAAAAAAAA", data: gzipSync(Buffer.from(JSON.stringify(obj))).toString("base64") });
+function sealing(kino, { gunzip = false } = {}) {
   kino.secret = (name) => (name === "feedKey" ? "test-key" : null);
   kino.crypto = {
     decrypt: (alg, o) => {
       if (alg !== "aes-256-gcm" || o.key !== "test-key" || o.ivEncoding !== "base64") throw new Error("bad decrypt call");
-      return Buffer.from(o.data, "base64").toString("utf8");
+      return o.outputEncoding === "base64" ? o.data : Buffer.from(o.data, "base64").toString("utf8");
     },
+    ...(gunzip ? { gunzip: (b64) => gunzipSync(Buffer.from(b64, "base64")).toString("utf8") } : {}),
   };
 }
 const feedFor = (serverKey, tabs, at = T) => ({ v: 1, at, serverKey, tabs });
 const RAILS = [{ id: "lcat-2956", catId: "2956", title: "ES DAZN", items: [{ id: "live-1", ref: "live:1~2956~es.dazn~es.hd.dazn.1", title: "DAZN 1 HD", kind: "live" }] }];
 
-// raw.githubusercontent.com: [data] and [main] answer per branch: a body (served as 200), a number (that status) or an Error.
-function github({ data, main, storage } = {}) {
+// raw.githubusercontent.com: [data] and [main] answer the v1 paths per branch, [data2] the v2 path on `data` (main never has
+// one): a body (served as 200), a number (that status) or an Error.
+function github({ data, data2, main, storage, gunzip = false } = {}) {
   const log = [];
   const k = installKino({ storage, routes: [(url) => {
     const u = new URL(url);
     if (u.hostname !== RAW) return undefined;
-    const m = u.pathname.match(/^\/xuper-plugin\/kino-plugin-supertv\/([^/]+)\/home\/([^/]+)\.enc\.json$/);
+    const m = u.pathname.match(/^\/xuper-plugin\/kino-plugin-supertv\/([^/]+)\/home\/([^/.]+)(\.v2)?\.enc\.json$/);
     if (!m) return res(404, "404: Not Found");
-    log.push({ branch: m[1], key: decodeURIComponent(m[2]), v: param(url, "v") });
-    const a = m[1] === "data" ? data : m[1] === "main" ? main : 404;
+    log.push({ branch: m[1] + (m[3] || ""), key: decodeURIComponent(m[2]), v: param(url, "v") });
+    const a = m[3] ? (m[1] === "data" ? data2 : 404) : m[1] === "data" ? data : m[1] === "main" ? main : 404;
     if (a instanceof Error) return a;
     if (typeof a === "number") return res(a, "404: Not Found");
     return a === undefined ? res(404, "404: Not Found") : res(200, a);
   }] });
-  sealing(k.kino);
+  sealing(k.kino, { gunzip });
   return { ...k, log, branches: () => log.map((e) => e.branch) };
 }
 
@@ -133,6 +138,51 @@ test("with a deadline every feed request carries a timeout within it; without ti
   assert.equal(g.requests.at(-1).init.timeoutMs, undefined);
 });
 
+// ---- feed v2 ----
+
+test("feed v2: data's gzip copy is read first, one request, opened with decrypt to base64 then gunzip", async () => {
+  const g = github({ gunzip: true, data2: box2(feedFor(KEY, { all: RAILS })), data: box(feedFor(KEY, { all: [] })), main: box(feedFor(KEY, { all: [] })) });
+  const hf = await fresh("homeFeed.js");
+  const feed = await hf.fetchHomeFeed(KEY);
+  assert.deepEqual(feed.tabs.all, RAILS);
+  assert.deepEqual(g.branches(), ["data.v2"]);
+  assert.equal(g.log[0].v, String(Math.floor(T / H)), "the same hourly cache-bust");
+});
+
+test("feed v2: a data v2 404 falls back to main's v1 (never data's v1) and keeps today's 6 h rule; anything else is not remembered", async () => {
+  const g = github({ gunzip: true, data2: 404, data: box(feedFor(KEY, { all: RAILS })), main: box(feedFor(KEY, { all: RAILS })) });
+  const hf = await fresh("homeFeed.js");
+  assert.ok(await hf.fetchHomeFeed(KEY));
+  assert.deepEqual(g.branches(), ["data.v2", "main"]);
+  assert.equal(g.kino.storage.get("feedData:v1"), String(T));
+  g.log.length = 0;
+  assert.ok(await hf.fetchHomeFeed(KEY));
+  assert.deepEqual(g.branches(), ["main"], "main alone for 6 h");
+  T += DATA_MISS_MS;
+  g.log.length = 0;
+  assert.ok(await hf.fetchHomeFeed(KEY));
+  assert.deepEqual(g.branches(), ["data.v2", "main"]);
+  // A v2 copy that does not open (a bad gzip, a v1 body that is not this feed's) falls back without a mark.
+  for (const data2 of [JSON.stringify({ v: 2, iv: "x", data: Buffer.from("not gzip").toString("base64") }), box2(feedFor("other", { all: RAILS })), 500]) {
+    const g2 = github({ gunzip: true, data2, main: box(feedFor(KEY, { all: RAILS })) });
+    const hf2 = await fresh("homeFeed.js");
+    assert.ok(await hf2.fetchHomeFeed(KEY), String(data2).slice(0, 30));
+    assert.deepEqual(g2.branches(), ["data.v2", "main"]);
+    assert.equal(g2.kino.storage.get("feedData:v1"), null);
+  }
+});
+
+test("feed v2: a Kino without kino.crypto.gunzip reads data's v1 copy, as 0.4.1 did; a v2 body there does not open", async () => {
+  const g = github({ data2: box2(feedFor(KEY, { all: RAILS })), data: box(feedFor(KEY, { all: RAILS })) });
+  const hf = await fresh("homeFeed.js");
+  assert.deepEqual((await hf.fetchHomeFeed(KEY)).tabs.all, RAILS);
+  assert.deepEqual(g.branches(), ["data"]);
+  const g2 = github({ data: box2(feedFor(KEY, { all: RAILS })), main: box(feedFor(KEY, { all: RAILS })) });
+  const hf2 = await fresh("homeFeed.js");
+  assert.ok(await hf2.fetchHomeFeed(KEY));
+  assert.deepEqual(g2.branches(), ["data", "main"]);
+});
+
 // ---- bare refs ----
 
 const bare = (id, title) => ({ id: "live-" + id, ref: "live:" + id, title, kind: "live" });
@@ -175,7 +225,11 @@ async function chosenWorld({ snap, feed } = {}) {
   const panel = (url) => { const u = new URL(url); if (u.hostname !== "a1.example") return undefined; log.push(param(url, "action") || u.pathname); return res(200, []); };
   const routes = [(url) => {
     const u = new URL(url);
-    if (u.hostname === RAW) { log.push("feed " + u.pathname.split("/")[3]); return feed ? res(200, box(feed)) : res(404, "404: Not Found"); }
+    if (u.hostname === RAW) {
+      const v2 = u.pathname.endsWith(".v2.enc.json");
+      log.push("feed " + u.pathname.split("/")[3] + (v2 ? ".v2" : ""));
+      return feed ? res(200, v2 ? box2(feed) : box(feed)) : res(404, "404: Not Found");
+    }
     return panel(url);
   }];
   const k = installKino({ routes, storage: {
@@ -183,7 +237,7 @@ async function chosenWorld({ snap, feed } = {}) {
     "srvChosen:v1": "1",
     "health:v1": JSON.stringify({ ts: T, online: [SRV.url] }),
   } });
-  sealing(k.kino);
+  sealing(k.kino, { gunzip: true });
   const cat = await import("../src/catalog.js");
   const key = cat.serverKey();
   k.store.set("cats:live:" + key, JSON.stringify({ ts: T, l: [["2956", "ES ▎DAZN"], ["3100", "MUNDIAL 2026"]] }));
@@ -208,7 +262,7 @@ test("a 0.4.0 feed: the Home rows, the rewritten snapshot and the native section
   let state = {};
   const r = await screen.screenEvent({ name: "tick", state, lang: "es" });
   state = { ...state, ...(r && r.state) };
-  assert.deepEqual(w.log, ["feed data"], "the feed's tick asks the panel nothing");
+  assert.deepEqual(w.log, ["feed data.v2"], "the feed's tick asks the panel nothing");
   const full = "live:201583~2956~es.dazn~es.hd.dazn.1";
   const view = JSON.stringify(await screen.screen({ route: { name: "main" }, state, device: { kind: "phone" } }));
   assert.ok(view.includes(`"${full}"`), "the ref reads the raw name");
@@ -240,13 +294,13 @@ test("Kino's native section asks on every tab switch: one feed download per runt
   feed.serverKey = w.key;
   const screen = await fresh("screen.js");
   for (const tab of ["all", "deportes", "radio", "all"]) await screen.section({ tab });
-  assert.deepEqual(w.log, ["feed data"], "one download for four calls");
+  assert.deepEqual(w.log, ["feed data.v2"], "one download for four calls");
   await screen.screenEvent({ name: "tick", state: {}, lang: "es" });
-  assert.deepEqual(w.log, ["feed data"], "the screen's Home uses the same copy");
+  assert.deepEqual(w.log, ["feed data.v2"], "the screen's Home uses the same copy");
   // Half an hour later the feed is asked again.
   T += 30 * 60000;
   await screen.section({ tab: "all" });
-  assert.deepEqual(w.log, ["feed data", "feed data"]);
+  assert.deepEqual(w.log, ["feed data.v2", "feed data.v2"]);
 });
 
 test("a stale health check runs after the Home's content and the events row, never before", async () => {
@@ -262,5 +316,5 @@ test("a stale health check runs after the Home's content and the events row, nev
     const r = await screen.screenEvent({ name: "tick", state, lang: "es" });
     state = { ...state, ...(r && r.state) };
   }
-  assert.deepEqual(w.log, ["feed data", "get_live_streams", "/player_api.php"], "the feed, the events row, then the liveness check");
+  assert.deepEqual(w.log, ["feed data.v2", "get_live_streams", "/player_api.php"], "the feed, the events row, then the liveness check");
 });

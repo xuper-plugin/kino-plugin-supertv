@@ -10,6 +10,7 @@
 // twice what the last one took when that is longer (PluginScreenSession.nextWait).
 import test from "node:test";
 import assert from "node:assert/strict";
+import { gzipSync, gunzipSync } from "node:zlib";
 import { installKino, res, kinoError, param, fresh, virtualNet } from "./helpers/fake-kino.mjs";
 import { keyOf, isDead } from "../src/panels.js";
 
@@ -50,10 +51,13 @@ function world({ accounts, storage, noFeed = false, start = Date.UTC(2026, 10, 1
     const lim = (init && init.timeoutMs) || 15000;
     if (u.hostname === "vegetatvv2.duckdns.org") { log.push({ n: "boot", at: net.now() }); return track(u, net.request(BOOT_MS).then(() => res(200, { ok: true, servers_text: listText }))); }
     if (u.hostname === "raw.githubusercontent.com") {
-      const key = decodeURIComponent(u.pathname.split("/").pop().replace(/\.enc\.json$/, ""));
-      log.push({ n: "feed", at: net.now(), key });
-      const feed = { v: 1, at: net.now(), serverKey: key, tabs: { all: [{ id: "lcat-2956", catId: "2956", title: "ES DAZN", items: [{ id: "live-201583", ref: "live:201583~2956~es.dazn~es.hd.dazn.1", title: "DAZN 1 HD", kind: "live" }] }] } };
-      return track(u, net.request(FEED_MS).then(() => (noFeed ? res(404, "") : res(200, JSON.stringify({ v: 1, iv: "AAAA", data: Buffer.from(JSON.stringify(feed)).toString("base64") })))));
+      const file = u.pathname.split("/").pop();
+      const v2 = file.endsWith(".v2.enc.json");
+      const key = decodeURIComponent(file.replace(/(\.v2)?\.enc\.json$/, ""));
+      log.push({ n: "feed", at: net.now(), key, v2 });
+      const feed = Buffer.from(JSON.stringify({ v: 1, at: net.now(), serverKey: key, tabs: { all: [{ id: "lcat-2956", catId: "2956", title: "ES DAZN", items: [{ id: "live-201583", ref: "live:201583~2956~es.dazn~es.hd.dazn.1", title: "DAZN 1 HD", kind: "live" }] }] } }));
+      const body = JSON.stringify({ v: v2 ? 2 : 1, iv: "AAAA", data: (v2 ? gzipSync(feed) : feed).toString("base64") });
+      return track(u, net.request(FEED_MS).then(() => (noFeed ? res(404, "") : res(200, body))));
     }
     const n = names.find((x) => new URL(acc[x].url).hostname === u.hostname && acc[x].username === param(url, "username"));
     if (!n) return undefined;
@@ -69,7 +73,10 @@ function world({ accounts, storage, noFeed = false, start = Date.UTC(2026, 10, 1
     return track(u, b > lim ? timeout() : net.request(b).then(() => { e.end = net.now(); return res(200, cats); }));
   }] });
   k.kino.secret = () => "test-key";
-  k.kino.crypto = { decrypt: (_alg, o) => Buffer.from(o.data, "base64").toString("utf8") };
+  k.kino.crypto = {
+    decrypt: (_alg, o) => (o.outputEncoding === "base64" ? o.data : Buffer.from(o.data, "base64").toString("utf8")),
+    gunzip: (b64) => gunzipSync(Buffer.from(b64, "base64")).toString("utf8"),
+  };
   // Kino answers a call only once every request it sent has settled.
   const drain = async () => { if (pending.size) await net.run(Promise.all([...pending])); };
   return { ...k, net, log, inFlight, acc, drain };
@@ -148,6 +155,7 @@ test("D1, the device list: the race replaces each failed account and picks the w
   const feed = w.log.filter((e) => e.n === "feed");
   assert.equal(feed.length, 1);
   assert.equal(feed[0].key, keyOfAcc(w, "nex"));
+  assert.ok(feed[0].v2, "data's gzip copy (feed v2)");
   assert.ok(feed[0].at - raceStart <= 3000, `the winner after ${feed[0].at - raceStart} ms of race`);
   assert.ok(!race.some((e) => e.n === "us"), "no other account starts once there is a winner");
   // Kino's limits.

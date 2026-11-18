@@ -3100,11 +3100,20 @@ function noteDataMissing(now) {
   } catch (_) {
   }
 }
-function openBox(box) {
-  if (!box || typeof box !== "object" || box.v !== 1 || typeof box.iv !== "string" || typeof box.data !== "string") return null;
+var canGunzip = () => {
   try {
-    const text2 = kino.crypto.decrypt("aes-256-gcm", { key: kino.secret("feedKey"), iv: box.iv, ivEncoding: "base64", data: box.data });
-    return JSON.parse(text2);
+    return typeof kino.crypto.gunzip === "function";
+  } catch (_) {
+    return false;
+  }
+};
+function openBox(box) {
+  if (!box || typeof box !== "object" || box.v !== 1 && box.v !== 2 || typeof box.iv !== "string" || typeof box.data !== "string") return null;
+  try {
+    const opts = { key: kino.secret("feedKey"), iv: box.iv, ivEncoding: "base64", data: box.data };
+    if (box.v === 1) return JSON.parse(kino.crypto.decrypt("aes-256-gcm", opts));
+    if (!canGunzip()) return null;
+    return JSON.parse(kino.crypto.gunzip(kino.crypto.decrypt("aes-256-gcm", { ...opts, outputEncoding: "base64" })));
   } catch (_) {
     return null;
   }
@@ -3125,7 +3134,7 @@ function feedOf(box, serverKey2) {
   }
   return Object.keys(tabs).length ? { tabs } : null;
 }
-async function fetchCopy(branch, serverKey2, opts) {
+async function fetchCopy(branch, serverKey2, opts, v2 = false) {
   let init = { headers: { Accept: "application/json" } };
   if (opts && typeof opts.until === "number") {
     const left = opts.until - Date.now() - 300;
@@ -3134,7 +3143,7 @@ async function fetchCopy(branch, serverKey2, opts) {
   }
   let r;
   try {
-    r = await kino.fetch(`${REPO}${branch}/${DIR}${encodeURIComponent(serverKey2)}.enc.json?v=${Math.floor(Date.now() / 36e5)}`, init);
+    r = await kino.fetch(`${REPO}${branch}/${DIR}${encodeURIComponent(serverKey2)}${v2 ? ".v2" : ""}.enc.json?v=${Math.floor(Date.now() / 36e5)}`, init);
   } catch (_) {
     return { net: true };
   }
@@ -3150,7 +3159,7 @@ async function fetchCopy(branch, serverKey2, opts) {
 async function loadFeed(serverKey2, opts) {
   try {
     if (!dataMissing(Date.now())) {
-      const d = await fetchCopy("data", serverKey2, opts);
+      const d = await fetchCopy("data", serverKey2, opts, canGunzip());
       if (d.feed) return d;
       if (d.net) return d;
       const m2 = await fetchCopy("main", serverKey2, opts);
