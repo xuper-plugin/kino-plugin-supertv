@@ -2090,7 +2090,7 @@ function cachedServerList() {
   return { current: st.idx, items, checked };
 }
 function listItems(st) {
-  const h = healthFresh();
+  const h = onlineNow();
   const online = h ? new Set(h.online) : null;
   let items = (st.list || []).map((s, i) => ({ s, i })).filter(({ s }) => usable(s)).map(({ s, i }) => {
     const fi = flagInfo(labelOf2(s));
@@ -2228,10 +2228,13 @@ function readHealth() {
     return null;
   }
 }
-var healthFresh = () => {
+var resultWithin = (ms) => {
   const h = readHealth();
-  return h && Date.now() - h.ts >= 0 && Date.now() - h.ts < HEALTH_TTL_MS ? h : null;
+  return h && Date.now() - h.ts >= 0 && Date.now() - h.ts < ms ? h : null;
 };
+var healthFresh = () => resultWithin(HEALTH_TTL_MS);
+var ONLINE_TRUST_MS = 30 * 60 * 1e3;
+var onlineNow = () => resultWithin(ONLINE_TRUST_MS);
 function fullDue(now = Date.now()) {
   if (fullRetry && fullRetry.of === globalThis.kino && now >= fullRetry.until - FULL_RETRY_MS && now < fullRetry.until) return false;
   const p = readPanels();
@@ -2741,7 +2744,7 @@ var failover = createLiveFailover({
   label: niceLabel,
   host: hostOf,
   online: () => {
-    const h = healthFresh();
+    const h = onlineNow();
     return h ? new Set(h.online) : null;
   },
   flag: flagOf,

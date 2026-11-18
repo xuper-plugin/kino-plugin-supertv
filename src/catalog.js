@@ -420,9 +420,10 @@ export function cachedServerList() {
   return { current: st.idx, items, checked };
 }
 
-// The picker's rows for [st] (no request): usable accounts only, online ones only after a fresh health check, Spanish first.
+// The picker's rows for [st] (no request): usable accounts only, online ones only after a recent health check (onlineNow),
+// Spanish first.
 function listItems(st) {
-  const h = healthFresh();
+  const h = onlineNow();
   const online = h ? new Set(h.online) : null;
   // Dead (auth 0) and blocked accounts are never offered: the first-run auto-pick and the picker skip them.
   let items = (st.list || []).map((s, i) => ({ s, i })).filter(({ s }) => usable(s)).map(({ s, i }) => {
@@ -580,7 +581,14 @@ let fullRetry = null; // { of: the kino of this runtime, until }
 function readHealth() {
   try { const o = JSON.parse(kino.storage.get(HEALTH_KEY) || "null"); return o && Array.isArray(o.online) && typeof o.ts === "number" ? o : null; } catch (_) { return null; }
 }
-const healthFresh = () => { const h = readHealth(); return h && Date.now() - h.ts >= 0 && Date.now() - h.ts < HEALTH_TTL_MS ? h : null; };
+const resultWithin = (ms) => { const h = readHealth(); return h && Date.now() - h.ts >= 0 && Date.now() - h.ts < ms ? h : null; };
+const healthFresh = () => resultWithin(HEALTH_TTL_MS);
+// What the picker and the live failover (its ranking and the player's server menu) take as the accounts online: a result
+// at most ONLINE_TRUST_MS old. The screen checks again only every HEALTH_TTL_MS, and an account that missed one 3 s ping
+// (or a round run with no network, which finds nothing online) must not leave the picker or that menu for hours: past this
+// age they offer every usable account, as they did before the check moved off the Home's path.
+const ONLINE_TRUST_MS = 30 * 60 * 1000;
+const onlineNow = () => resultWithin(ONLINE_TRUST_MS);
 // The panel map is missing or FULL_EVERY_MS old: the next round downloads live categories. The screen runs it then even
 // when the health result is still fresh: waiting for that result to age (up to 6 h more) could put the full round past the
 // 24 h after which the failover's same-panel step has no confirmed account left.
@@ -1167,7 +1175,7 @@ const failover = createLiveFailover({
   playUrl: (srv, id, format) => `${srv.url}/live/${srv.username}/${srv.password}/${id}.${format || liveFormat()}`,
   label: niceLabel,
   host: hostOf,
-  online: () => { const h = healthFresh(); return h ? new Set(h.online) : null; },
+  online: () => { const h = onlineNow(); return h ? new Set(h.online) : null; },
   flag: flagOf,
   priority: priorityOf,
   seed: installSeed,

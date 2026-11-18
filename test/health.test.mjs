@@ -163,3 +163,13 @@ test("a full round nothing answered leaves the panel map as it was and is tried 
   assert.ok(!cat.healthReady(), "tried again after 30 min");
   assert.equal(w.log.length, n);
 });
+
+test("the picker and the player's server menu trust a health result 30 min; past that they offer every usable account", async () => {
+  const w = world({ panelsAt: Date.UTC(2026, 10, 18, 2) });
+  const cat = await fresh("catalog.js");
+  await round(w, cat);
+  assert.equal(cat.cachedServerList().items.length, 20, "the ten that missed the 3 s ping are left out");
+  await w.net.run(w.net.request(31 * 60000));
+  assert.ok(cat.healthReady(), "the screen still checks again only after 6 h");
+  assert.equal(cat.cachedServerList().items.length, 30, "an account that missed one ping is not hidden for hours");
+});
