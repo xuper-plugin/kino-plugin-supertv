@@ -237,20 +237,18 @@ test("refs are identical for every account of a panel (a favourite does not chur
   assert.deepEqual(a, b);
 });
 
-test("first run: the health check runs before the auto-pick, which never tries a dead account; a lost flag heals", async () => {
+test("first run: the auto-pick races the top three at once and never chooses a dead account; a lost flag heals", async () => {
   const w = world();
   const screen = await fresh("screen.js");
   let state = {};
   const tick = async () => { const r = await screen.screenEvent({ name: "tick", state, lang: "es" }); state = { ...state, ...(r && r.state) }; };
   await tick();
-  assert.deepEqual(new Set(w.log.filter((e) => e.action).map((e) => e.n)), new Set(["dead", "a1", "a2", "c", "off"]), "the health check probed every server once");
-  const n = w.log.length;
-  await tick();
-  const pick = w.log.slice(n);
-  assert.equal(pick.length, 1, "the auto-pick tried one server");
-  assert.notEqual(pick[0].n, "dead");
+  // The dead https account sorts first and answers first: it is marked, never chosen; no health check before the Home.
+  assert.deepEqual(w.log.filter((e) => e.action).map((e) => e.n + " " + e.action), ["dead get_live_categories", "a1 get_live_categories", "a2 get_live_categories"]);
+  assert.equal(activeName(w), "a1");
+  assert.equal(srvs(w).chosen, keyOf(srvOf("a1")));
+  assert.ok(isDead(srvOf("dead"), T));
   assert.equal(w.store.get("srvChosen:v1"), "1");
-  assert.ok(srvs(w).chosen);
   // The flag disappears (an older build's eviction): the chosen server still counts and the flag is written again.
   w.store.delete("srvChosen:v1");
   const view = await screen.screen({ route: { name: "main" }, state, device: { kind: "phone" } });

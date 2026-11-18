@@ -405,6 +405,12 @@ const priorityOf = (srv) => srvPriority({ flag: flagOf(srv), label: niceLabel(sr
 // La lista para el selector (nunca usuario ni contraseña). Con un chequeo de salud fresco, solo muestra los que responden.
 export async function serverList() {
   const st = await loadServers(false);
+  const { items, checked } = listItems(st);
+  return { current: st.idx, items, checked };
+}
+
+// The picker's rows for [st] (no request): usable accounts only, online ones only after a fresh health check, Spanish first.
+function listItems(st) {
   const h = healthFresh();
   const online = h ? new Set(h.online) : null;
   // Dead (auth 0) and blocked accounts are never offered: the first-run auto-pick and the picker skip them.
@@ -417,7 +423,58 @@ export async function serverList() {
   });
   if (online && online.size > 0) items = items.filter((x) => x.online);
   items.sort((a, b) => srvPriority(a) - srvPriority(b) || a.i - b.i); // hispanohablantes primero (estable por índice)
-  return { current: st.idx, items, checked: !!h };
+  return { items, checked: !!h };
+}
+
+// ---- first-run auto-pick ---------------------------------------------------------------------------------------------
+const AUTOPICK_RACE = 3;          // accounts raced at once: under Kino's 4 requests per host and 6 per plugin
+const AUTOPICK_TIMEOUT_MS = 4000;
+
+// The value of the first of [jobs] to fulfil, or null once every one failed. The others run on (Kino answers a call only
+// after its requests settle) and their values are dropped.
+function firstFulfilled(jobs) {
+  return new Promise((resolve) => {
+    let pending = jobs.length;
+    if (!pending) { resolve(null); return; }
+    for (const j of jobs) Promise.resolve(j).then(resolve, () => { if (--pending === 0) resolve(null); });
+  });
+}
+
+/**
+ * First run, before any Home: the top AUTOPICK_RACE accounts of the picker's ranking (Spanish first; never a dead or blocked
+ * one) are asked for their live categories at once, AUTOPICK_TIMEOUT_MS each (less when [until] is nearer), and the first
+ * whose answer is a real list becomes the active and chosen server, its categories kept (the Home needs no second request).
+ * An account that answers dead or empty never wins. A server already chosen is never replaced. Never throws.
+ * `{ ok, host, label, kept? }`; ok false when no account answered well in time.
+ */
+export async function autoPickServer({ until = Date.now() + 16000 } = {}) {
+  try {
+    const st = await loadServers(false, { timeoutMs: LIST_TIMEOUT_MS });
+    if (st.chosen) { const cur = st.list[st.idx]; return { ok: true, kept: true, host: hostOf(cur), label: labelOf(cur) }; }
+    const { items } = listItems(st);
+    const order = [...items.filter((x) => x.es), ...items.filter((x) => !x.es)].slice(0, AUTOPICK_RACE);
+    const left = until - Date.now() - 500;
+    if (!order.length || left < 1000) return { ok: false };
+    const timeoutMs = Math.min(AUTOPICK_TIMEOUT_MS, left);
+    const win = await firstFulfilled(order.map(async (x) => {
+      const srv = st.list[x.i];
+      const data = await callServer(srv, PROBE, {}, { timeoutMs });
+      if (!Array.isArray(data) || !data.length) throw new Error("respuesta inválida");
+      return { srv, data };
+    }));
+    if (!win) return { ok: false };
+    const cur = readSrvs() || st;
+    const k = keyOf(win.srv);
+    const i = Array.isArray(cur.list) ? cur.list.findIndex((s) => keyOf(s) === k) : -1;
+    if (i < 0 || cur.chosen) return { ok: false };
+    cur.idx = i; cur.ok = true; cur.okAt = Date.now(); cur.chosen = k;
+    writeSrvs(cur);
+    rememberLiveCats(win.srv, win.data);
+    return { ok: true, host: hostOf(win.srv), label: labelOf(win.srv) };
+  } catch (e) {
+    lastErr = errText(e);
+    return { ok: false };
+  }
 }
 
 // Fija un servidor elegido a mano (no se vuelve solo al de casa). Prueba el elegido; si no responde, otros del

@@ -2055,6 +2055,10 @@ var flagOf = (srv) => {
 var priorityOf = (srv) => srvPriority({ flag: flagOf(srv), label: niceLabel(srv) });
 async function serverList() {
   const st = await loadServers(false);
+  const { items, checked } = listItems(st);
+  return { current: st.idx, items, checked };
+}
+function listItems(st) {
   const h = healthFresh();
   const online = h ? new Set(h.online) : null;
   let items = (st.list || []).map((s, i) => ({ s, i })).filter(({ s }) => usable(s)).map(({ s, i }) => {
@@ -2065,7 +2069,56 @@ async function serverList() {
   });
   if (online && online.size > 0) items = items.filter((x) => x.online);
   items.sort((a, b) => srvPriority(a) - srvPriority(b) || a.i - b.i);
-  return { current: st.idx, items, checked: !!h };
+  return { items, checked: !!h };
+}
+var AUTOPICK_RACE = 3;
+var AUTOPICK_TIMEOUT_MS = 4e3;
+function firstFulfilled(jobs) {
+  return new Promise((resolve2) => {
+    let pending = jobs.length;
+    if (!pending) {
+      resolve2(null);
+      return;
+    }
+    for (const j of jobs) Promise.resolve(j).then(resolve2, () => {
+      if (--pending === 0) resolve2(null);
+    });
+  });
+}
+async function autoPickServer({ until = Date.now() + 16e3 } = {}) {
+  try {
+    const st = await loadServers(false, { timeoutMs: LIST_TIMEOUT_MS });
+    if (st.chosen) {
+      const cur2 = st.list[st.idx];
+      return { ok: true, kept: true, host: hostOf(cur2), label: labelOf2(cur2) };
+    }
+    const { items } = listItems(st);
+    const order = [...items.filter((x) => x.es), ...items.filter((x) => !x.es)].slice(0, AUTOPICK_RACE);
+    const left = until - Date.now() - 500;
+    if (!order.length || left < 1e3) return { ok: false };
+    const timeoutMs = Math.min(AUTOPICK_TIMEOUT_MS, left);
+    const win = await firstFulfilled(order.map(async (x) => {
+      const srv = st.list[x.i];
+      const data = await callServer(srv, PROBE, {}, { timeoutMs });
+      if (!Array.isArray(data) || !data.length) throw new Error("respuesta inv\xE1lida");
+      return { srv, data };
+    }));
+    if (!win) return { ok: false };
+    const cur = readSrvs() || st;
+    const k = keyOf(win.srv);
+    const i = Array.isArray(cur.list) ? cur.list.findIndex((s) => keyOf(s) === k) : -1;
+    if (i < 0 || cur.chosen) return { ok: false };
+    cur.idx = i;
+    cur.ok = true;
+    cur.okAt = Date.now();
+    cur.chosen = k;
+    writeSrvs(cur);
+    rememberLiveCats(win.srv, win.data);
+    return { ok: true, host: hostOf(win.srv), label: labelOf2(win.srv) };
+  } catch (e) {
+    lastErr = errText(e);
+    return { ok: false };
+  }
 }
 async function selectServer(i) {
   const st = await loadServers(false);
@@ -2956,6 +3009,7 @@ var found = null;
 var pickServers = null;
 var cacheKey = null;
 var autoPickTried = false;
+var pickedNow = false;
 var homeFeedData = /* @__PURE__ */ new Map();
 var homeFeedTried = false;
 var eventsRow = null;
@@ -3098,22 +3152,22 @@ function readSnap(tab) {
     return null;
   }
 }
+var AUTOPICK_BUDGET_MS = 16e3;
+var FEED_MIN_MS = 2500;
 async function autoPick() {
   autoPickTried = true;
+  const until = Date.now() + AUTOPICK_BUDGET_MS;
+  let r = null;
   try {
-    const list = await serverList();
-    const items = list.items || [];
-    const order = [...items.filter((x) => x.es), ...items.filter((x) => !x.es)].slice(0, 6);
-    for (const it of order) {
-      const r = await selectServer(String(it.i)).catch(() => ({ ok: false }));
-      if (r && r.ok) {
-        markServerChosen();
-        cacheKey = serverKey();
-        return;
-      }
-    }
+    r = await autoPickServer({ until });
   } catch (_) {
+    r = null;
   }
+  if (!r || !r.ok) return;
+  markServerChosen();
+  cacheKey = serverKey();
+  pickedNow = !r.kept;
+  if (until - Date.now() >= FEED_MIN_MS) await loadHomeFeed({ until });
 }
 async function loadHomeFeed(opts) {
   homeFeedTried = true;
@@ -3200,9 +3254,10 @@ var tabOf = (state, route) => {
   return TAB_IDS.includes(state.tab) ? state.tab : TAB_IDS.includes(a.tab) ? a.tab : storedTab() || TAB_IDS[0];
 };
 function unitsFor(tab) {
-  if (!serverChosen()) return autoPickTried ? ["health", "pick"] : ["health", "autopick"];
+  if (!serverChosen()) return autoPickTried ? ["health", "pick"] : ["autopick"];
   let base;
-  if (homeFeedData.has(tab)) base = ["hfeed", "health"];
+  if (pickedNow) base = homeFeedData.has(tab) ? ["hfeed", "health"] : ["hfeed", "cats", "tab:" + tab, "health"];
+  else if (homeFeedData.has(tab)) base = ["hfeed", "health"];
   else if (!homeFeedTried) base = ["hfeed", "health", "cats", "tab:" + tab];
   else base = ["health", "cats", "tab:" + tab];
   if (tab === TAB_IDS[0] && eventsOn() && !eventsTried) base = [...base, "events"];
@@ -3267,7 +3322,7 @@ function mainView(ctx) {
     const rest = (data && data.rails || []).filter((r) => r.id !== eventsRow.id);
     data = { ...data || { partial: false }, rails: [eventsRow, ...rest] };
   }
-  if (!data && !healthReady() && !(state.failed && state.failed.health)) return verifyingView({ device: ctx.device });
+  if (!data && !healthReady() && !pickedNow && !(state.failed && state.failed.health)) return verifyingView({ device: ctx.device });
   const failed = unitsFor(tab).some((u) => state.failed && state.failed[u]);
   return browseView({ tab, data, loading: pendingUnit(state, tab) !== null, failed: !data && failed, device: ctx.device });
 }
