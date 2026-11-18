@@ -3,7 +3,7 @@
 // Todo lo cargado se descarta si cambia el servidor activo (las categorías e ids no coinciden entre servidores).
 import * as cat from "./catalog.js";
 import { say, twin } from "./i18n.js";
-import { put } from "./store.js";
+import { put, jsonLen } from "./store.js";
 import { TAB_IDS, browseView, searchView, liveView, settingsView, verifyingView, firstPickView, cardOf } from "./screenView.js";
 import { fetchHomeFeed, upgradeBareRefs } from "./homeFeed.js";
 import { PLUGIN_VERSION } from "./version.js";
@@ -109,23 +109,66 @@ function randomizeRows(rails, seed) {
 }
 
 // ---- Feed pre-armado + snapshot en dispositivo ----
-const HOME_SNAP_PREFIX = "homeSnap:";
-const SNAP_V = 1;
-const SNAP_MAX = 9 * 1024; // por tab; varias pestañas caben en el presupuesto de la clase homeSnap (40 KB)
+// The snapshot: every tab of the server in ONE entry (`homeSnap:v2:<serverKey>`), so a feed costs one storage rewrite instead
+// of one per tab. Each tab is trimmed (fewer cards per rail, then fewer rails) to SNAP_TAB_MAX and the whole to SNAP_MAX, in
+// Kino's measure of its store (store.js jsonLen), inside the 40 KB homeSnap class (another server's snapshot is evicted).
+// A snapshot written by 0.4.1 (`homeSnap:v1:<serverKey>:<tab>`, one per tab) is still read until the first feed replaces it.
+const SNAP_V = 2;
+const SNAP_TAB_MAX = 7.5 * 1024;
+const SNAP_MAX = 36 * 1024;
 const slimCard = (c) => ({ id: c.id, ref: c.ref, title: c.title, ...(c.kind ? { kind: c.kind } : {}), ...(c.poster ? { poster: c.poster } : {}) });
-const snapKey = (tab) => HOME_SNAP_PREFIX + "v" + SNAP_V + ":" + cat.serverKey() + ":" + tab;
-function writeTabSnap(tab, rails) {
-  try {
-    if (!rails || !rails.length) return;
-    // Se recorta hasta caber: menos ítems por fila y, si hace falta, menos filas. Tarjetas slim (lo que una fila necesita).
-    for (const maxRails of [rails.length, 10, 8, 6]) {
-      for (let per = 10; per >= 5; per -= 2) {
-        const slim = { v: SNAP_V, at: Date.now(), rails: rails.slice(0, maxRails).map((r) => ({ id: r.id, catId: r.catId, title: r.title, items: (r.items || []).slice(0, per).map(slimCard) })) };
-        const text = JSON.stringify(slim);
-        if (text.length <= SNAP_MAX) { put(snapKey(tab), text); return; }
-      }
+const snapKey = () => "homeSnap:v" + SNAP_V + ":" + cat.serverKey();
+const oldSnapKey = (tab) => "homeSnap:v1:" + cat.serverKey() + ":" + tab;
+let snapMemo = null; // { key, tabs: { tab: rails as stored } } of the last snapshot read or written in this runtime
+
+// [rails] slimmed and trimmed until the tab's JSON fits [max] bytes in Kino's measure; null when not even 6 x 5 fit.
+function snapTab(rails, max) {
+  for (const maxRails of [rails.length, 10, 8, 6]) {
+    for (let per = 10; per >= 5; per -= 2) {
+      const slim = rails.slice(0, maxRails).map((r) => ({ id: r.id, catId: r.catId, title: r.title, items: (r.items || []).slice(0, per).map(slimCard) }));
+      if (jsonLen(JSON.stringify(slim)) <= max) return slim;
     }
+  }
+  return null;
+}
+
+function writeSnap(tabsRails) {
+  try {
+    const tabs = {};
+    let left = SNAP_MAX;
+    // The tab the person looks at first goes first: when the whole runs out of room, the last tabs are the ones left out.
+    const order = [storedTab() || TAB_IDS[0], ...TAB_IDS].filter((t, i, a) => a.indexOf(t) === i && tabsRails.has(t));
+    for (const tab of order) {
+      const rails = tabsRails.get(tab);
+      if (!rails || !rails.length) continue;
+      const slim = snapTab(rails, Math.min(SNAP_TAB_MAX, left - 64));
+      if (!slim) continue;
+      tabs[tab] = slim;
+      left -= jsonLen(JSON.stringify(slim)) + 16;
+    }
+    if (!Object.keys(tabs).length) return;
+    const key = snapKey();
+    if (put(key, JSON.stringify({ v: SNAP_V, at: Date.now(), tabs }))) snapMemo = { key, tabs };
   } catch (_) { /* almacenamiento lleno: sin snapshot */ }
+}
+
+// The stored rails of [tab]: the server's snapshot (read once per runtime), else a 0.4.1 per-tab snapshot. null: none.
+function storedSnapRails(tab) {
+  const key = snapKey();
+  if (!snapMemo || snapMemo.key !== key) {
+    let tabs = null;
+    try {
+      const o = JSON.parse(kino.storage.get(key) || "null");
+      if (o && o.v === SNAP_V && o.tabs && typeof o.tabs === "object") tabs = o.tabs;
+    } catch (_) { tabs = null; }
+    snapMemo = { key, tabs: tabs || {} };
+  }
+  const rails = snapMemo.tabs[tab];
+  if (Array.isArray(rails) && rails.length) return rails;
+  try {
+    const o = JSON.parse(kino.storage.get(oldSnapKey(tab)) || "null");
+    return o && o.v === 1 && Array.isArray(o.rails) && o.rails.length ? o.rails : null;
+  } catch (_) { return null; }
 }
 
 // The active server's category names, looked up (from its cached categories, no request) only when a bare ref needs one.
@@ -140,12 +183,12 @@ const feedRails = (rails, catName = catNames()) => cleanRails(upgradeBareRefs(ra
 
 function readSnap(tab) {
   try {
-    const o = JSON.parse(kino.storage.get(snapKey(tab)) || "null");
-    if (!(o && o.v === SNAP_V && Array.isArray(o.rails) && o.rails.length)) return null;
+    const rails = storedSnapRails(tab);
+    if (!rails) return null;
     // A snapshot written by an older build (or from an older feed) carries decorated titles: cleaned when read. Its bare refs
     // (0.4.0) gain their category, so the live failover covers a tap before the feed lands; its titles may be cleaned
     // already, so they carry no channel name.
-    return { ...o, rails: cleanRails(upgradeBareRefs(o.rails, { catName: catNames() }), cat.langNow()) };
+    return { rails: cleanRails(upgradeBareRefs(rails, { catName: catNames() }), cat.langNow()) };
   } catch (_) { return null; }
 }
 
@@ -198,10 +241,9 @@ async function loadHomeFeed(opts) {
   for (const tab of Object.keys(feed.tabs)) {
     // The feed is built by the Action from the published code: a feed from before the title cleanup still carries the
     // panels' decorated names (and bare refs). Cleaning again is a no-op on titles already clean.
-    const rails = feedRails(feed.tabs[tab], names);
-    homeFeedData.set(tab, rails);
-    writeTabSnap(tab, rails);
+    homeFeedData.set(tab, feedRails(feed.tabs[tab], names));
   }
+  writeSnap(homeFeedData);
 }
 
 // Elige la categoría de "eventos en vivo" del grupo configurado: prefiere la de agenda/eventos/hoy/vivo, si no la primera.

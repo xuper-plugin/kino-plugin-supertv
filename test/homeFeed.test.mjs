@@ -213,8 +213,23 @@ test("a 0.4.0 feed: the Home rows, the rewritten snapshot and the native section
   const view = JSON.stringify(await screen.screen({ route: { name: "main" }, state, device: { kind: "phone" } }));
   assert.ok(view.includes(`"${full}"`), "the ref reads the raw name");
   assert.ok(view.includes('"DAZN 1 HD"') && !view.includes("ES ▎"), "the shown title is clean");
-  const snap = JSON.parse(w.store.get(`homeSnap:v1:${w.key}:all`));
-  assert.equal(snap.rails[0].items[0].ref, full);
+  const snap = JSON.parse(w.store.get(`homeSnap:v2:${w.key}`));
+  assert.equal(snap.tabs.all[0].items[0].ref, full);
   const sec = await screen.section({ tab: "all" });
   assert.equal(sec.rows[0].items[0].ref, full);
+});
+
+test("a feed load rewrites Kino's store twice: one snapshot entry for every tab, then the index once, when the call ends", async () => {
+  const feed = feedFor(null, { all: RAILS, deportes: RAILS, radio: RAILS });
+  const w = await chosenWorld({ feed });
+  feed.serverKey = w.key;
+  const plugin = await fresh("plugin.js");
+  w.writes.length = 0;
+  await plugin.screenEvent({ name: "tick", state: {}, lang: "es" });
+  assert.deepEqual(w.writes, [`homeSnap:v2:${w.key}`, "_idx"]);
+  assert.deepEqual(Object.keys(JSON.parse(w.store.get(`homeSnap:v2:${w.key}`)).tabs).sort(), ["all", "deportes", "radio"]);
+  // A render reads the snapshot once per runtime, never writes.
+  w.writes.length = 0;
+  await plugin.screen({ route: { name: "main" }, state: { tab: "radio" }, device: { kind: "phone" } });
+  assert.deepEqual(w.writes, []);
 });
