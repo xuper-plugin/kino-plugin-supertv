@@ -19,7 +19,7 @@ const b64 = (s) => Buffer.from(s).toString("base64");
 // [epg]: ms until the active account answers each get_short_epg, "hang" (until its timeout), "down" (a network error after
 // 200 ms) or "late" (the first four in 300 ms, then hang); [chosen]: B chosen while A is active (backHome's case);
 // [listAge]: how old the stored server list is, the bootstrap answering a renewal after [boot] ms.
-function world({ epg = 300, chosen = false, listAge = 0, boot = 2000 } = {}) {
+function world({ epg = 300, chosen = false, listAge = 0, boot = 2000, title = null } = {}) {
   const start = Date.UTC(2026, 10, 17, 20);
   const net = virtualNet({ start, parallel: 6 });
   Date.now = net.now;
@@ -45,7 +45,7 @@ function world({ epg = 300, chosen = false, listAge = 0, boot = 2000 } = {}) {
       // "late": the first four answer at once, every later one hangs (a panel that stops answering mid-call).
       if (epg === "late" && log.filter((x) => x.action === "get_short_epg").length > 4) return track(net.request(lim).then(() => { e.end = net.now(); return kinoError("timeout", "timed out"); }));
       const now = Math.floor(start / 1000);
-      return track(net.request(epg === "late" ? 300 : epg).then(() => { e.end = net.now(); return res(200, { epg_listings: [{ title: b64("Programa " + param(url, "stream_id")), description: b64("x"), start_timestamp: String(now - 600), stop_timestamp: String(now + 1800) }] }); }));
+      return track(net.request(epg === "late" ? 300 : epg).then(() => { e.end = net.now(); return res(200, { epg_listings: [{ title: b64(title == null ? "Programa " + param(url, "stream_id") : title), description: b64("x"), start_timestamp: String(now - 600), stop_timestamp: String(now + 1800) }] }); }));
     }
     return track(net.request(400).then(() => { e.end = net.now(); return kinoError("network", "down"); }));
   }] });
@@ -151,4 +151,12 @@ test("a server list 7 h old: the guide renews nothing (the next api() call does)
     assert.equal(new Set(out.map((p) => p.channelId)).size, answered, `${listAge / H} h: channels with a programme (2 s of bootstrap leave 1.5 s)`);
     assert.equal(w.net.now() - t0, took, `${listAge / H} h: Kino holds the call`);
   }
+});
+
+test("a programme title the panel sent with HTML entities is shown decoded (Storm &amp; Alexis is Storm & Alexis)", async () => {
+  const w = world({ epg: 250, title: "Storm &amp; Alexis" });
+  const cat = await fresh("catalog.js");
+  const out = await w.net.run(cat.guide({ channelIds: idsOf(4), from: w.start - 3600000, to: w.start + 3600000 }));
+  await w.drain();
+  assert.equal(out[0].title, "Storm & Alexis");
 });

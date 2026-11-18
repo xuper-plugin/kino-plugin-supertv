@@ -8,7 +8,7 @@ import { say } from "./i18n.js";
 import { keyOf, pairHashes, groupPanels, readPanels, writePanels, panelOf, noteDead, noteBlocked, noteAlive, usable, accountVerdict } from "./panels.js";
 import { categoryTok, channelTok } from "./channelMatch.js";
 import { createLiveFailover, liveRef } from "./liveFailover.js";
-import { channelTitles, cleanChannelTitle, categoryKey, normName } from "./channelTitle.js";
+import { channelTitles, cleanChannelTitle, categoryKey, normName, decodeEntities } from "./channelTitle.js";
 
 export { keyOf };
 
@@ -1143,8 +1143,8 @@ export async function guide({ channelIds, from, to }) {
       for (const e of rows) {
         const p = {
           channelId: cid,
-          title: b64text(e.title),
-          description: b64text(e.description || e.descr),
+          title: decodeEntities(b64text(e.title)),
+          description: decodeEntities(b64text(e.description || e.descr)),
           start: (parseInt(e.start_timestamp, 10) || 0) * 1000,
           end: (parseInt(e.stop_timestamp || e.end_timestamp, 10) || 0) * 1000,
         };

@@ -2705,8 +2705,8 @@ async function guide({ channelIds, from, to }) {
       for (const e of rows) {
         const p = {
           channelId: cid,
-          title: b64text(e.title),
-          description: b64text(e.description || e.descr),
+          title: decodeEntities(b64text(e.title)),
+          description: decodeEntities(b64text(e.description || e.descr)),
           start: (parseInt(e.start_timestamp, 10) || 0) * 1e3,
           end: (parseInt(e.stop_timestamp || e.end_timestamp, 10) || 0) * 1e3
         };
