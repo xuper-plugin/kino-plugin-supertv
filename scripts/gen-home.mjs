@@ -165,6 +165,10 @@ for (const i of order) {
     const spent = phase();
     const home = await buildServer();
     if (!home) { console.log(`#${i + 1} ${key} (${ms(t0)} ms): sin canales (${spent()})`); empty++; continue; }
+    // api() fails over to another account when one request fails, so the build can end on another account than the one it
+    // began on: the result then carries that account's serverKey and the readers reject it under this key's name. It is
+    // never published; the previous set's copy is carried forward instead.
+    if (home.serverKey !== key || cat.serverKey() !== key) { console.log(`#${i + 1} ${key} (${ms(t0)} ms): the build moved to another account midway; not published, the previous copy stays (${spent()})`); fail++; continue; }
     const enc = seal(home);
     writeFileSync(join(OUT_DIR, key + ".enc.json"), enc);
     written.set(`home/${key}.enc.json`, home.at);
