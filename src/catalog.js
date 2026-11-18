@@ -1072,18 +1072,21 @@ function b64text(s) {
   }
 }
 
-// Native En vivo asks the guide of a category's first 40 visible channels in ONE call (LiveViewModel.requestEpg) before it
-// asks the categories and the channels, and those wait behind it on the plugin's single call lane: one get_short_epg per
-// channel, each through api() with its own backHome and a walk over every account, held the categories 2.4-4.4 s behind
-// 25-51 panel requests (2026-11-17, Redmi). Now a call asks only the first GUIDE_MAX channels (the top of the grid), on the
-// ACTIVE account alone (a stream id's guide is its panel's; another account's walk would only add requests), with one
-// backHome per call, GUIDE_LANES at once (Kino runs 4 of a plugin's requests per host), each within GUIDE_TRY_MS and the
-// whole call within GUIDE_MS. Channels past GUIDE_MAX get no programme from this call: Kino keeps that answer 30 min.
-const GUIDE_MAX = 12;
+// Native En vivo asks the guide of a category's first 40 visible channels in ONE call (LiveViewModel.requestEpg), in chunks
+// of up to 50 (PluginLiveContract.MAX_GUIDE_CHANNELS), before it asks the categories and the channels, which wait behind it
+// on the plugin's single call lane. Kino stores what a call answers for EVERY channel of its chunk for 30 min, a channel
+// left out as an empty guide (PluginLiveProvider.askGuide), and LiveViewModel never asks again a channel it has an entry
+// for: so a call answers every channel it was sent, never only the first few. It asks the ACTIVE account alone (a stream
+// id's guide is its panel's; another account's walk would only add requests), with one backHome per call, GUIDE_LANES at
+// once (Kino runs 4 of a plugin's requests per host), each within GUIDE_TRY_MS, the whole call within GUIDE_MS: no request
+// starts with less than GUIDE_MIN_TRY_MS left (none after 3 s), so the slowest few finish instead of being dropped, and
+// Kino, which holds a call until every request it sent settles, never holds this one longer. 40 channels at 250 ms come to
+// 2.5 s, 50 to 3.25 s; a silent panel holds the call 3.5 s.
+const GUIDE_MAX = 50;
 const GUIDE_LANES = 4;
-const GUIDE_TRY_MS = 3000;
-const GUIDE_MS = 4000;
-const GUIDE_MIN_TRY_MS = 1000;
+const GUIDE_TRY_MS = 2500;
+const GUIDE_MS = 3500;
+const GUIDE_MIN_TRY_MS = 500;
 
 export async function guide({ channelIds, from, to }) {
   const ids = (Array.isArray(channelIds) ? channelIds : []).map((cid) => [String(cid), String(cid).replace(/^live-/, "")])

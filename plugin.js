@@ -2643,11 +2643,11 @@ function b64text(s) {
     return str;
   }
 }
-var GUIDE_MAX = 12;
+var GUIDE_MAX = 50;
 var GUIDE_LANES = 4;
-var GUIDE_TRY_MS = 3e3;
-var GUIDE_MS = 4e3;
-var GUIDE_MIN_TRY_MS = 1e3;
+var GUIDE_TRY_MS = 2500;
+var GUIDE_MS = 3500;
+var GUIDE_MIN_TRY_MS = 500;
 async function guide({ channelIds, from, to }) {
   const ids = (Array.isArray(channelIds) ? channelIds : []).map((cid) => [String(cid), String(cid).replace(/^live-/, "")]).filter(([, streamId]) => /^\d+$/.test(streamId)).slice(0, GUIDE_MAX);
   if (!ids.length) return [];
