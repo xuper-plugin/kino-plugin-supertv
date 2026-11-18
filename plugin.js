@@ -2494,14 +2494,14 @@ function catNameOf(catId) {
   if (catNames.list !== m.list) catNames = { list: m.list, map: new Map(m.list.map((c) => [String(c.category_id), c.category_name])) };
   return catNames.map.get(String(catId)) || "";
 }
-function liveItem(s, categoryId, adult, shown) {
+function liveItem(s, categoryId, adult, shown2) {
   const id = String(s.stream_id || "");
   const raw = String(s.name || "").trim();
   if (!id || !raw) return null;
   const catId = String(categoryId || s.category_id || "");
   return {
     id: "live-" + id,
-    title: shown || raw,
+    title: shown2 || raw,
     ref: liveRef(id, catId, categoryTok(catNameOf(catId)), channelTok(raw)),
     logo: img(s.stream_icon),
     number: parseInt(s.num, 10) || void 0,
@@ -2518,10 +2518,10 @@ async function categoryItems(categoryId) {
   const m = memoList(serverKey(), id);
   const tag = langNow() + (adult ? "|a" : "") + "|" + catNameOf(id);
   if (m && m.list === all && m.items && m.items.tag === tag) return m.items.list;
-  const shown = shownTitles(all, categoryKey(catNameOf(id)));
+  const shown2 = shownTitles(all, categoryKey(catNameOf(id)));
   const items = [];
   for (let i = 0; i < all.length; i++) {
-    const it = liveItem(all[i], id, adult, shown[i]);
+    const it = liveItem(all[i], id, adult, shown2[i]);
     if (it) items.push(it);
   }
   if (m && m.list === all) m.items = { tag, list: items };
@@ -2575,10 +2575,10 @@ async function liveSearchDetailed({ query }, { budgetMs = 11e3 } = {}) {
   }
   if (items.length < LIMIT && scanned < cats.length) capped = true;
   if (!items.length && failed) throw kino.error("unavailable", "la b\xFAsqueda no pudo completarse", { userMessage: "No se pudo completar la b\xFAsqueda." });
-  const shown = shownTitles(items.map((it) => ({ name: it.title })), "");
+  const shown2 = shownTitles(items.map((it) => ({ name: it.title })), "");
   const asked = normName2(query);
   items.forEach((it, i) => {
-    if (normName2(it.title) !== asked) it.title = shown[i];
+    if (normName2(it.title) !== asked) it.title = shown2[i];
   });
   return { items, partial: failed > 0 || capped };
 }
@@ -2757,7 +2757,7 @@ var LOGO_DATA = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAYAAADDP
 // src/screenView.js
 var TAB_IDS = ["all", "premium", "paises", "deportes", "radio"];
 var TAB_KEYS = { all: "tabAll", premium: "tabPremium", paises: "tabCountries", deportes: "tabSports", radio: "tabRadio" };
-var POLL_MS = 1500;
+var POLL_MS = 1e3;
 var GRID_CAP = 60;
 var HTTPS = /^https:\/\//;
 var PRESS_MS = 3e4;
@@ -3487,20 +3487,23 @@ function serverSheet(servers) {
   const body = rows.length ? rows : [{ type: "Text", key: "srvEmpty", ...twin("liveEmpty", "text") }];
   return { ...twin("setPick", "title"), body };
 }
+var TAB_LANES = 4;
 async function loadGroupTab(tab) {
   const cats = (liveCatsAll || []).filter((c) => inGroup(tab, c)).slice(0, RAILS_PER_TAB);
   let failed = 0;
-  const results = [];
-  for (let i = 0; i < cats.length; i += 3) {
-    results.push(...await Promise.all(cats.slice(i, i + 3).map(async (c) => {
+  const results = new Array(cats.length).fill(null);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(TAB_LANES, cats.length) }, async () => {
+    while (next < cats.length) {
+      const i = next++;
+      const c = cats[i];
       try {
-        return { c, page: await liveChannels({ categoryId: c.id }) };
+        results[i] = { c, page: await liveChannels({ categoryId: c.id }) };
       } catch (_) {
         failed++;
-        return null;
       }
-    })));
-  }
+    }
+  }));
   const rails = [];
   for (const r of results) {
     if (!r) continue;
@@ -3567,6 +3570,36 @@ async function runUnit(unit) {
   }
   const [, tab] = unit.split(":");
   await loadGroupTab(tab);
+}
+var TICK_BUDGET_MS = 1200;
+var HEAVY = (unit) => unit === "health" || unit.startsWith("tab:");
+var ALONE = /* @__PURE__ */ new Set(["autopick", "rescue", "pick"]);
+function shown(tab) {
+  const g = groupRails.get(tab);
+  return [homeFeedData.has(tab) ? 1 : 0, g ? g.rails.length : -1, eventsRow ? eventsRow.items.length : 0, pickServers ? 1 : 0].join(",");
+}
+var hasContent = (tab) => homeFeedData.has(tab) || groupRails.has(tab) || !!storedSnapRails(tab);
+async function runUnits(tab, failed) {
+  const t0 = Date.now();
+  let ran = 0;
+  let changed = false;
+  for (; ; ) {
+    const unit = pendingUnit({ failed }, tab);
+    if (!unit) break;
+    if (ran && (ALONE.has(unit) || Date.now() - t0 >= TICK_BUDGET_MS || changed && HEAVY(unit))) break;
+    const before = shown(tab);
+    const had = hasContent(tab);
+    try {
+      await runUnit(unit);
+    } catch (_) {
+      failed[unit] = true;
+    }
+    ran++;
+    cacheKey = serverKey();
+    if (ALONE.has(unit) || HEAVY(unit) || !had && hasContent(tab)) break;
+    if (shown(tab) !== before) changed = true;
+  }
+  return ran;
 }
 function mainView(ctx) {
   const state = ctx.state || {};
@@ -3643,18 +3676,12 @@ var events = {
     if (data && data.partial) groupRails.delete(tab);
     return { state: { failed: null, ...bump(state) } };
   },
+  // Runs the pending units in order, several in one tick while it is cheap to (see runUnits).
   async tick({ state }) {
     const tab = tabOf(state);
-    const unit = pendingUnit(state, tab);
-    if (!unit) return null;
     const failed = { ...state.failed || {} };
-    try {
-      await runUnit(unit);
-    } catch (_) {
-      failed[unit] = true;
-    }
-    cacheKey = serverKey();
-    return { state: { ...bump(state), failed } };
+    const ran = await runUnits(tab, failed);
+    return ran ? { state: { ...bump(state), failed } } : null;
   },
   openSearch() {
     return { route: { push: "search" }, state: { sq: "", sstate: null } };

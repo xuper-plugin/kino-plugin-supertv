@@ -5,7 +5,9 @@ import { LOGO_DATA } from "./logo.js";
 // Pestañas por grupo de canales. "all" = todas las categorías; el resto filtra por grupo (categoryRules.LIVE_GROUPS).
 export const TAB_IDS = ["all", "premium", "paises", "deportes", "radio"];
 const TAB_KEYS = { all: "tabAll", premium: "tabPremium", paises: "tabCountries", deportes: "tabSports", radio: "tabRadio" };
-const POLL_MS = 1_500;
+// The loading timer. Kino waits this long after a tick ends, or twice what a slow tick took (PluginScreenSession.nextWait);
+// screen.js runs several cheap units in one tick, so the first data comes a second after the open render.
+const POLL_MS = 1_000;
 const GRID_CAP = 60;
 const HTTPS = /^https:\/\//;
 export const PRESS_MS = 30_000;

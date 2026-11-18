@@ -289,15 +289,20 @@ function serverSheet(servers) {
 }
 
 // Cada fila es una petición y el servidor IPTV admite 60 por minuto: se piden pocas categorías y pocos canales por fila.
+// TAB_LANES at once: Kino runs 4 of a plugin's requests per host, and every row asks the active account's host.
+const TAB_LANES = 4;
 async function loadGroupTab(tab) {
   const cats = (liveCatsAll || []).filter((c) => inGroup(tab, c)).slice(0, RAILS_PER_TAB);
   let failed = 0;
-  const results = [];
-  for (let i = 0; i < cats.length; i += 3) {
-    results.push(...await Promise.all(cats.slice(i, i + 3).map(async (c) => {
-      try { return { c, page: await cat.liveChannels({ categoryId: c.id }) }; } catch (_) { failed++; return null; }
-    })));
-  }
+  const results = new Array(cats.length).fill(null);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(TAB_LANES, cats.length) }, async () => {
+    while (next < cats.length) {
+      const i = next++;
+      const c = cats[i];
+      try { results[i] = { c, page: await cat.liveChannels({ categoryId: c.id }) }; } catch (_) { failed++; }
+    }
+  }));
   const rails = [];
   for (const r of results) {
     if (!r) continue;
@@ -357,6 +362,46 @@ async function runUnit(unit) {
   if (unit === "pick") { pickServers = await cat.serverList(); return; }
   const [, tab] = unit.split(":");
   await loadGroupTab(tab);
+}
+
+// ---- the tick scheduler -------------------------------------------------------------------------------------------------
+// Kino waits the timer's 1 s after a tick, or twice what a slow tick took (PluginScreenSession.nextWait), and holds every
+// other call of the plugin (a channel the person taps) while a tick runs. So one tick runs several units back to back while
+// it stays under TICK_BUDGET_MS, and stops early when there is something new to paint before a long unit:
+// - the first content of the tab paints at once (the unit that brought it ends the tick);
+// - a heavy unit (HEAVY: many requests, or the first run's own deadlines) never starts after a unit that changed what the
+//   person sees, and ends its tick, so what it brings paints right after it;
+// - the first run's units (autopick, rescue, pick) always run alone.
+const TICK_BUDGET_MS = 1200;
+const HEAVY = (unit) => unit === "health" || unit.startsWith("tab:");
+const ALONE = new Set(["autopick", "rescue", "pick"]);
+
+// What the person would see change: the tab's content, the events row, the picker's rows.
+function shown(tab) {
+  const g = groupRails.get(tab);
+  return [homeFeedData.has(tab) ? 1 : 0, g ? g.rails.length : -1, eventsRow ? eventsRow.items.length : 0, pickServers ? 1 : 0].join(",");
+}
+// The tab shows rails already: the feed's, the live ones, or the last session's snapshot.
+const hasContent = (tab) => homeFeedData.has(tab) || groupRails.has(tab) || !!storedSnapRails(tab);
+
+// Runs the tab's pending units by the rules above; [failed] collects the units that threw. How many ran.
+async function runUnits(tab, failed) {
+  const t0 = Date.now();
+  let ran = 0;
+  let changed = false;
+  for (;;) {
+    const unit = pendingUnit({ failed }, tab);
+    if (!unit) break;
+    if (ran && (ALONE.has(unit) || Date.now() - t0 >= TICK_BUDGET_MS || (changed && HEAVY(unit)))) break;
+    const before = shown(tab);
+    const had = hasContent(tab);
+    try { await runUnit(unit); } catch (_) { failed[unit] = true; }
+    ran++;
+    cacheKey = cat.serverKey();
+    if (ALONE.has(unit) || HEAVY(unit) || (!had && hasContent(tab))) break;
+    if (shown(tab) !== before) changed = true;
+  }
+  return ran;
 }
 
 function mainView(ctx) {
@@ -436,14 +481,12 @@ const events = {
     if (data && data.partial) groupRails.delete(tab);
     return { state: { failed: null, ...bump(state) } };
   },
+  // Runs the pending units in order, several in one tick while it is cheap to (see runUnits).
   async tick({ state }) {
     const tab = tabOf(state);
-    const unit = pendingUnit(state, tab);
-    if (!unit) return null;
     const failed = { ...(state.failed || {}) };
-    try { await runUnit(unit); } catch (_) { failed[unit] = true; }
-    cacheKey = cat.serverKey();
-    return { state: { ...bump(state), failed } };
+    const ran = await runUnits(tab, failed);
+    return ran ? { state: { ...bump(state), failed } } : null;
   },
   openSearch() { return { route: { push: "search" }, state: { sq: "", sstate: null } }; },
   search({ value, route }) {

@@ -6,8 +6,8 @@
 // choice already made is never touched.
 //
 // Kino is modelled as on a device: it holds a call until every request the call sent has settled (the plugin does not set
-// __kinoDropPendingFetches), runs a plugin's requests 6 at once, and waits 1.5 s before the next tick, or twice what the last
-// one took when that is longer (PluginScreenSession.nextWait).
+// __kinoDropPendingFetches), runs a plugin's requests 6 at once, and waits the view's timer (1 s) before the next tick, or
+// twice what the last one took when that is longer (PluginScreenSession.nextWait).
 import test from "node:test";
 import assert from "node:assert/strict";
 import { installKino, res, kinoError, param, fresh, virtualNet } from "./helpers/fake-kino.mjs";
@@ -100,14 +100,15 @@ async function driver(w) {
   const sleep = (ms) => w.net.run(w.net.request(ms));
   const run = async (maxTicks = 8) => {
     const t0 = w.net.now();
-    let wait = 1500;
+    const timer = (v) => { const e = JSON.parse(v).every; return e ? e.ms : 1000; };
+    let wait = timer(await view());
     for (let i = 0; i < maxTicks; i++) {
       await sleep(wait);
       const t = await tick();
       const v = await view();
       if (v.includes('"rail-lcat-')) return { kind: "home", at: w.net.now() - t0, ticks: i + 1 };
       if (v.includes('"fpPage"')) return { kind: "picker", at: w.net.now() - t0, ticks: i + 1 };
-      wait = Math.max(1500, 2 * t.took);
+      wait = Math.max(timer(v), 2 * t.took);
     }
     return { kind: "none", at: w.net.now() - t0, ticks: maxTicks };
   };
@@ -158,7 +159,7 @@ test("D1, the device list: the race replaces each failed account and picks the w
   for (const e of race.filter((x) => x.n === "kri" || x.n === "fv")) assert.equal(e.end - e.at, e.timeoutMs);
   assert.equal(t.took, Math.max(...race.map((e) => e.end)) - t.at, "Kino releases the call when the last account settles");
   assert.equal(t.took, BOOT_MS + 1050 + 2500, "fv, started at 1.05 s when cap died, holds the call to its 2.5 s (nex won at 1.9 s)");
-  assert.ok(out.at <= 5600, `content ${out.at} ms after the open (with 4 s tries: 7.05 s; 0.4.0 on the device: about 16 s)`);
+  assert.equal(out.at, 1000 + BOOT_MS + 1050 + 2500, "content 5.05 s after the open (1.5 s timer and 4 s tries: 7.05 s; 0.4.0 on the device: about 16 s)");
   // The health check comes after the Home's other units: the dead accounts are skipped, the choice stays.
   const n = w.log.length;
   for (let i = 0; i < 3 && !probes(w, n).length; i++) await d.tick();
@@ -330,7 +331,9 @@ test("a server the person chose is never raced or replaced", async () => {
   const d2 = await driver(w);
   const n = w.log.length;
   await d2.tick();
-  assert.equal(probes(w, n).length, 0);
+  // The snapshot is there now, so this tick also runs the events row: its categories, from the chosen account (backHome
+  // returns there), never a race over the ranking.
+  assert.ok(probes(w, n).every((e) => e.n === "g2"), probes(w, n).map((e) => e.n).join(","));
   assert.equal(srvs(w).chosen, keyOf(list[2]));
   // A health check asked to pick never replaces a choice either.
   await w.net.run(cat.healthCheck({ pick: true }));
