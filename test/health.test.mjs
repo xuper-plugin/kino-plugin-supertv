@@ -101,3 +101,16 @@ test("a tick a channel tap could wait behind: at most 3 s, against up to 15 s fo
   await w2.drain();
   assert.ok(w2.net.now() - t0 > 10000, String(w2.net.now() - t0));
 });
+
+test("no server list at all (bootstrap down, none stored): the step ends the check instead of asking every second", async () => {
+  const start = Date.UTC(2026, 10, 18, 12);
+  Date.now = () => start;
+  const k = installKino({ routes: [() => kinoError("network", "down")] });
+  const cat = await fresh("catalog.js");
+  await cat.healthStep();
+  assert.ok(cat.healthReady());
+  const n = k.requests.length;
+  assert.ok(n >= 1 && n <= 2, String(n));
+  await cat.healthStep();
+  assert.equal(k.requests.length, n * 2, "a direct call still tries");
+});

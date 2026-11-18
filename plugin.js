@@ -2345,6 +2345,10 @@ async function healthStep() {
     }
   } catch (_) {
     round = null;
+    try {
+      put(HEALTH_KEY, JSON.stringify({ ts: Date.now(), online: [] }));
+    } catch (__) {
+    }
   } finally {
     healthRunning = false;
   }

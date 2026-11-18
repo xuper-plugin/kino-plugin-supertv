@@ -703,7 +703,10 @@ export async function healthStep() {
       finishHealth({ st: r.st, answered: r.answered, unprobed: new Set(), sets: r.sets, best: null });
     }
   } catch (_) {
+    // No server list (the bootstrap is down and none is stored): written as a check with nothing online, as healthCheck
+    // does, so the screen's timer does not ask the bootstrap again every second.
     round = null;
+    try { put(HEALTH_KEY, JSON.stringify({ ts: Date.now(), online: [] })); } catch (__) { /* nada */ }
   } finally { healthRunning = false; }
 }
 
