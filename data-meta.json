@@ -1,0 +1,160 @@
+{
+ "$comment": "Written by the Home pre-armado job of this repo. This branch is force-pushed on every run with the complete current set; it has no history. Each <path>.v2.enc.json is the compressed copy (feed v2: gzip before sealing) of <path>.enc.json.",
+ "v": 1,
+ "at": 1795235026278,
+ "maxAgeMs": 259200000,
+ "files": {
+  "home/182wy7g.enc.json": {
+   "builtAt": 1795234850745,
+   "bytes": 95453
+  },
+  "home/182wy7g.v2.enc.json": {
+   "builtAt": 1795234850745,
+   "bytes": 7069
+  },
+  "home/1gainyz.enc.json": {
+   "builtAt": 1795202454726,
+   "bytes": 151597,
+   "carried": true
+  },
+  "home/1gainyz.v2.enc.json": {
+   "builtAt": 1795202454726,
+   "bytes": 10121,
+   "carried": true
+  },
+  "home/1jdauya.enc.json": {
+   "builtAt": 1795234876900,
+   "bytes": 207953
+  },
+  "home/1jdauya.v2.enc.json": {
+   "builtAt": 1795234876900,
+   "bytes": 11113
+  },
+  "home/1ntbt4k.enc.json": {
+   "builtAt": 1795234812406,
+   "bytes": 100369
+  },
+  "home/1ntbt4k.v2.enc.json": {
+   "builtAt": 1795234812406,
+   "bytes": 7209
+  },
+  "home/1oij252.enc.json": {
+   "builtAt": 1795234770432,
+   "bytes": 207953
+  },
+  "home/1oij252.v2.enc.json": {
+   "builtAt": 1795234770432,
+   "bytes": 11113
+  },
+  "home/1ovu7wq.enc.json": {
+   "builtAt": 1795234957478,
+   "bytes": 163577
+  },
+  "home/1ovu7wq.v2.enc.json": {
+   "builtAt": 1795234957478,
+   "bytes": 8901
+  },
+  "home/1pj87nj.enc.json": {
+   "builtAt": 1795234992929,
+   "bytes": 148965
+  },
+  "home/1pj87nj.v2.enc.json": {
+   "builtAt": 1795234992929,
+   "bytes": 8169
+  },
+  "home/1y25z2t.enc.json": {
+   "builtAt": 1795234923609,
+   "bytes": 75257
+  },
+  "home/1y25z2t.v2.enc.json": {
+   "builtAt": 1795234923609,
+   "bytes": 4097
+  },
+  "home/1ykpmip.enc.json": {
+   "builtAt": 1795235025784,
+   "bytes": 206385
+  },
+  "home/1ykpmip.v2.enc.json": {
+   "builtAt": 1795235025784,
+   "bytes": 16189
+  },
+  "home/4wup92.enc.json": {
+   "builtAt": 1795148485168,
+   "bytes": 265577,
+   "carried": true
+  },
+  "home/4wup92.v2.enc.json": {
+   "builtAt": 1795148485168,
+   "bytes": 20661,
+   "carried": true
+  },
+  "home/7ynvir.enc.json": {
+   "builtAt": 1795234911951,
+   "bytes": 187773
+  },
+  "home/7ynvir.v2.enc.json": {
+   "builtAt": 1795234911951,
+   "bytes": 15633
+  },
+  "home/8gh231.enc.json": {
+   "builtAt": 1795202377931,
+   "bytes": 168401,
+   "carried": true
+  },
+  "home/8gh231.v2.enc.json": {
+   "builtAt": 1795202377931,
+   "bytes": 15157,
+   "carried": true
+  },
+  "home/n2lgvq.enc.json": {
+   "builtAt": 1795234952221,
+   "bytes": 181653
+  },
+  "home/n2lgvq.v2.enc.json": {
+   "builtAt": 1795234952221,
+   "bytes": 12097
+  },
+  "home/p3smij.enc.json": {
+   "builtAt": 1795234933312,
+   "bytes": 89877
+  },
+  "home/p3smij.v2.enc.json": {
+   "builtAt": 1795234933312,
+   "bytes": 5161
+  },
+  "home/phkwgh.enc.json": {
+   "builtAt": 1795202362280,
+   "bytes": 138757,
+   "carried": true
+  },
+  "home/phkwgh.v2.enc.json": {
+   "builtAt": 1795202362280,
+   "bytes": 9137,
+   "carried": true
+  },
+  "home/piqpj1.enc.json": {
+   "builtAt": 1795234858698,
+   "bytes": 145725
+  },
+  "home/piqpj1.v2.enc.json": {
+   "builtAt": 1795234858698,
+   "bytes": 8225
+  },
+  "home/vinhiu.enc.json": {
+   "builtAt": 1795234862953,
+   "bytes": 142593
+  },
+  "home/vinhiu.v2.enc.json": {
+   "builtAt": 1795234862953,
+   "bytes": 11245
+  },
+  "home/vucghl.enc.json": {
+   "builtAt": 1795234757682,
+   "bytes": 224829
+  },
+  "home/vucghl.v2.enc.json": {
+   "builtAt": 1795234757682,
+   "bytes": 21469
+  }
+ }
+}
